@@ -29,6 +29,10 @@ def format_time(minutes: int) -> str:
     return f"{hours}ч {mins:02d}м"
 
 
+def ordinal_ride(n: int) -> str:
+    return f"{n}-й заезд"
+
+
 def avg_speed(km: float, minutes: int) -> float:
     if minutes <= 0:
         return 0.0
@@ -45,6 +49,34 @@ def parse_float(value: str) -> float:
 
 def parse_int(value: str) -> int:
     return int(value)
+
+
+def parse_duration(value: str) -> int:
+    value = value.strip()
+
+    if value.isdigit():
+        return int(value)
+
+    for sep in (":", ",", "."):
+        if sep in value:
+            parts = value.split(sep)
+            if len(parts) != 2:
+                break
+
+            hours_str, mins_str = parts[0].strip(), parts[1].strip()
+
+            if not hours_str.isdigit() or not mins_str.isdigit():
+                break
+
+            hours = int(hours_str)
+            mins = int(mins_str)
+
+            if mins >= 60:
+                raise ValueError("Минуты должны быть меньше 60")
+
+            return hours * 60 + mins
+
+    raise ValueError("Некорректный формат времени")
 
 
 def looks_like_date(value: str) -> bool:
@@ -240,6 +272,16 @@ def clear_edit_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_edit_offset", None)
 
 
+def clear_add_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("pending_add_step", None)
+    context.user_data.pop("pending_add_data", None)
+
+
+def cancel_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_edit_state(context)
+    clear_add_state(context)
+
+
 # ---------- TEXT ----------
 
 def first_start_text(user_name: str | None = None) -> str:
@@ -289,6 +331,46 @@ def help_text() -> str:
     )
 
 
+def add_intro_text() -> str:
+    return (
+        "➕ Добавление заезда\n\n"
+        "Сейчас запишем поездку по шагам.\n"
+        "Сначала пришли дату заезда в формате:\n"
+        "YYYY-MM-DD"
+    )
+
+
+def add_ask_km_text(ride_date: str) -> str:
+    return (
+        "Дата записана.\n"
+        f"{ride_date}\n\n"
+        "Теперь пришли дистанцию в километрах.\n"
+        "Например:\n"
+        "25\nили\n25.5"
+    )
+
+
+def add_ask_time_text(km: float) -> str:
+    return (
+        f"Дистанция записана: {km:.1f} км\n\n"
+        "Теперь пришли время заезда.\n"
+        "Можно так:\n"
+        "90\n"
+        "1:30\n"
+        "1,30\n"
+        "1.30"
+    )
+
+
+def add_ask_note_text(minutes: int) -> str:
+    return (
+        f"Время записано: {format_time(minutes)}\n\n"
+        "Теперь пришли короткую заметку или название заезда.\n"
+        "Если заметка не нужна, отправь минус:\n"
+        "-"
+    )
+
+
 def praise_text(km: float) -> str:
     if km >= 60:
         return "Вот это уже серьёзный выезд. Хорошая работа."
@@ -313,16 +395,44 @@ def maintenance_warning_text(user_id: int):
 
 
 def added_ride_text(user_id: int, km: float, minutes: int) -> str:
+    ride_number = rides_count(user_id)
+
     lines = [
-        f"Добавил заезд: {km:.1f} км.",
+        f"Это твой {ordinal_ride(ride_number)}.",
+        f"Дистанция: {km:.1f} км.",
         praise_text(km),
         f"Время: {format_time(minutes)}.",
         f"Средняя скорость: {avg_speed(km, minutes):.1f} км/ч.",
-        f"Ты уже проехал {total_km(user_id):.1f} км, ВАУ!",
+        f"Общий пробег: {total_km(user_id):.1f} км.",
     ]
+
     warning = maintenance_warning_text(user_id)
     if warning:
         lines.append(warning)
+
+    return "\n".join(lines)
+
+
+def add_done_text(user_id: int, ride_date: str, km: float, minutes: int, note: str) -> str:
+    ride_number = rides_count(user_id)
+
+    lines = [
+        f"Это твой {ordinal_ride(ride_number)}.",
+        f"Дата: {ride_date}",
+        f"Дистанция: {km:.1f} км",
+        f"Время: {format_time(minutes)}",
+        f"Средняя скорость: {avg_speed(km, minutes):.1f} км/ч",
+    ]
+
+    if note:
+        lines.append(f"Заметка: {note}")
+
+    lines.append(f"Общий пробег: {total_km(user_id):.1f} км")
+
+    warning = maintenance_warning_text(user_id)
+    if warning:
+        lines.append(warning)
+
     return "\n".join(lines)
 
 
@@ -464,7 +574,7 @@ def reset_warning_text() -> str:
 
 def main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Добавить", callback_data="help")],
+        [InlineKeyboardButton("➕ Добавить заезд", callback_data="add_start")],
         [InlineKeyboardButton("📊 Краткая сводка", callback_data="summary")],
         [InlineKeyboardButton("📚 Статистика", callback_data="rides:0")],
         [InlineKeyboardButton("⚙️ Трансмиссия", callback_data="trans")],
@@ -547,7 +657,7 @@ def reset_kb(offset: int) -> InlineKeyboardMarkup:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     created = ensure_user(user.id)
-    clear_edit_state(context)
+    cancel_input_states(context)
 
     await update.message.reply_text(
         first_start_text(user.first_name) if created else regular_start_text(),
@@ -566,32 +676,28 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_edit_id = context.user_data.get("pending_edit_ride_id")
     pending_edit_offset = context.user_data.get("pending_edit_offset", 0)
 
+    pending_add_step = context.user_data.get("pending_add_step")
+    pending_add_data = context.user_data.get("pending_add_data", {})
+
     parts = text.split()
 
-    is_new_ride_input = False
-    try:
-        if len(parts) >= 2 and not looks_like_date(parts[0]):
-            parse_float(parts[0])
-            parse_int(parts[1])
-            is_new_ride_input = True
-        elif len(parts) >= 3 and looks_like_date(parts[0]):
-            parse_float(parts[1])
-            parse_int(parts[2])
-            is_new_ride_input = True
-    except Exception:
-        is_new_ride_input = False
-
-    if pending_edit_id and not is_new_ride_input:
+    # ---------- EDIT MODE ----------
+    if pending_edit_id:
         try:
             if len(parts) < 3 or not looks_like_date(parts[0]):
                 raise ValueError
             ride_date = parts[0]
             km = parse_float(parts[1])
-            minutes = parse_int(parts[2])
+            minutes = parse_duration(parts[2])
             note = " ".join(parts[3:]) if len(parts) > 3 else ""
         except Exception:
             await update.message.reply_text(
-                "Для редактирования пришли так:\nYYYY-MM-DD км минуты заметка",
+                "Для редактирования пришли так:\nYYYY-MM-DD км время заметка\n\n"
+                "Примеры времени:\n"
+                "90\n"
+                "1:30\n"
+                "1,30\n"
+                "1.30",
                 reply_markup=edit_action_kb(pending_edit_id, pending_edit_offset),
             )
             return
@@ -620,23 +726,112 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ---------- THOUGHTFUL ADD MODE ----------
+    if pending_add_step == "date":
+        if not looks_like_date(text):
+            await update.message.reply_text(
+                "Нужна дата в формате:\nYYYY-MM-DD",
+                reply_markup=main_kb(),
+            )
+            return
+
+        pending_add_data["date"] = text
+        context.user_data["pending_add_data"] = pending_add_data
+        context.user_data["pending_add_step"] = "km"
+
+        await update.message.reply_text(
+            add_ask_km_text(text),
+            reply_markup=main_kb(),
+        )
+        return
+
+    if pending_add_step == "km":
+        try:
+            km = parse_float(text)
+        except Exception:
+            await update.message.reply_text(
+                "Не понял дистанцию.\nПришли число, например:\n25\nили\n25.5",
+                reply_markup=main_kb(),
+            )
+            return
+
+        pending_add_data["km"] = km
+        context.user_data["pending_add_data"] = pending_add_data
+        context.user_data["pending_add_step"] = "time"
+
+        await update.message.reply_text(
+            add_ask_time_text(km),
+            reply_markup=main_kb(),
+        )
+        return
+
+    if pending_add_step == "time":
+        try:
+            minutes = parse_duration(text)
+        except Exception:
+            await update.message.reply_text(
+                "Не понял время.\nПришли, например:\n90\n1:30\n1,30\n1.30",
+                reply_markup=main_kb(),
+            )
+            return
+
+        pending_add_data["minutes"] = minutes
+        context.user_data["pending_add_data"] = pending_add_data
+        context.user_data["pending_add_step"] = "note"
+
+        await update.message.reply_text(
+            add_ask_note_text(minutes),
+            reply_markup=main_kb(),
+        )
+        return
+
+    if pending_add_step == "note":
+        note = "" if text == "-" else text
+
+        ride_date = pending_add_data["date"]
+        km = pending_add_data["km"]
+        minutes = pending_add_data["minutes"]
+
+        add_ride(user_id, ride_date, km, minutes, note)
+        clear_add_state(context)
+
+        await update.message.reply_text(
+            add_done_text(user_id, ride_date, km, minutes, note),
+            reply_markup=main_kb(),
+        )
+        return
+
+    # ---------- QUICK ADD MODE ----------
+    is_new_ride_input = False
+    try:
+        if len(parts) >= 2 and not looks_like_date(parts[0]):
+            parse_float(parts[0])
+            parse_duration(parts[1])
+            is_new_ride_input = True
+        elif len(parts) >= 3 and looks_like_date(parts[0]):
+            parse_float(parts[1])
+            parse_duration(parts[2])
+            is_new_ride_input = True
+    except Exception:
+        is_new_ride_input = False
+
     try:
         if len(parts) >= 2 and not looks_like_date(parts[0]):
             ride_date = today_str()
             km = parse_float(parts[0])
-            minutes = parse_int(parts[1])
+            minutes = parse_duration(parts[1])
             note = " ".join(parts[2:]) if len(parts) > 2 else ""
         elif len(parts) >= 3 and looks_like_date(parts[0]):
             ride_date = parts[0]
             km = parse_float(parts[1])
-            minutes = parse_int(parts[2])
+            minutes = parse_duration(parts[2])
             note = " ".join(parts[3:]) if len(parts) > 3 else ""
         else:
             return
     except Exception:
         return
 
-    clear_edit_state(context)
+    clear_add_state(context)
     add_ride(user_id, ride_date, km, minutes, note)
 
     await update.message.reply_text(
@@ -655,8 +850,20 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "noop":
         return
 
-    if query.data == "menu":
+    if query.data == "add_start":
         clear_edit_state(context)
+        clear_add_state(context)
+        context.user_data["pending_add_step"] = "date"
+        context.user_data["pending_add_data"] = {}
+
+        await query.message.reply_text(
+            add_intro_text(),
+            reply_markup=main_kb(),
+        )
+        return
+
+    if query.data == "menu":
+        cancel_input_states(context)
         await query.message.reply_text(
             regular_start_text(),
             reply_markup=main_kb(),
@@ -664,7 +871,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "help":
-        clear_edit_state(context)
+        cancel_input_states(context)
         await query.message.reply_text(
             help_text(),
             reply_markup=main_kb(),
@@ -672,7 +879,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "summary":
-        clear_edit_state(context)
+        cancel_input_states(context)
         await query.message.reply_text(
             summary_text(user_id),
             reply_markup=main_kb(),
@@ -680,7 +887,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "trans":
-        clear_edit_state(context)
+        cancel_input_states(context)
         await query.message.reply_text(
             transmission_text(user_id),
             reply_markup=main_kb(),
@@ -688,7 +895,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("rides:"):
-        clear_edit_state(context)
+        cancel_input_states(context)
         offset = int(query.data.split(":")[1])
         await query.message.reply_text(
             rides_text(user_id, offset),
@@ -697,7 +904,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("edit_menu:"):
-        clear_edit_state(context)
+        cancel_input_states(context)
         offset = int(query.data.split(":")[1])
         await query.message.reply_text(
             edit_intro_text(user_id, offset),
@@ -744,7 +951,12 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         note_text = ride["note"] if ride["note"] else ""
         await query.message.reply_text(
             "Пришли новые данные одним сообщением:\n"
-            "YYYY-MM-DD км минуты заметка\n\n"
+            "YYYY-MM-DD км время заметка\n\n"
+            "Время можно указать так:\n"
+            "90\n"
+            "1:30\n"
+            "1,30\n"
+            "1.30\n\n"
             f"Сейчас: {ride['date']} {float(ride['km']):.1f} {int(ride['min'])} {note_text}",
             reply_markup=edit_action_kb(ride_id, offset),
         )
@@ -770,7 +982,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("delete_yes:"):
-        clear_edit_state(context)
+        cancel_input_states(context)
         _, ride_id_str, offset_str = query.data.split(":")
         ride_id = int(ride_id_str)
         offset = int(offset_str)
@@ -792,7 +1004,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("service_menu:"):
-        clear_edit_state(context)
+        cancel_input_states(context)
         offset = int(query.data.split(":")[1])
         await query.message.reply_text(
             service_intro_text(),
@@ -801,7 +1013,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "backup":
-        clear_edit_state(context)
+        cancel_input_states(context)
         rides = [dict(r) for r in all_rides(user_id)]
         payload = {
             "user_id": user_id,
@@ -826,7 +1038,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("reset:"):
-        clear_edit_state(context)
+        cancel_input_states(context)
         offset = int(query.data.split(":")[1])
         await query.message.reply_text(
             reset_warning_text(),
@@ -835,7 +1047,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("reset_yes:"):
-        clear_edit_state(context)
+        cancel_input_states(context)
         reset_user_data(user_id)
         await query.message.reply_text(
             "Всё очищено. Начинаем с чистого листа.",
