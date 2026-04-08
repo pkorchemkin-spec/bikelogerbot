@@ -242,20 +242,28 @@ def clear_edit_state(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ---------- TEXT ----------
 
-def first_start_text() -> str:
+def first_start_text(user_name: str | None = None) -> str:
+    name_part = f", {user_name}" if user_name else ""
     return (
-        "🚴 Привет. Это веложурнал-одометр.\n\n"
-        "Он нужен, чтобы вручную записывать поездки без GPS, считать общий пробег "
-        "и держать обслуживание велосипеда под контролем.\n\n"
+        f"🚴 Привет{name_part}.\n\n"
+        "Это твой веложурнал — тихий блокнот для дорог, асфальта и внезапных покатушек после мыслей "
+        "\"да я всего на полчасика\".\n\n"
+        "Здесь можно вручную сохранять поездки, даже если не было GPS, велокомпа или Strava снова решила жить своей жизнью.\n\n"
         "Что умеет бот:\n"
         "• добавлять заезды вручную\n"
-        "• считать общий километраж и общее время\n"
-        "• показывать краткую сводку\n"
-        "• хранить историю поездок\n"
-        "• делать бэкап\n\n"
-        "Как быстро добавить поездку:\n"
+        "• считать общий пробег и время\n"
+        "• показывать сводку по поездкам\n"
+        "• хранить историю заездов\n"
+        "• напоминать про обслуживание цепи\n"
+        "• делать бэкап данных\n\n"
+        "Как добавить поездку быстро:\n"
         "25 90\n\n"
-        "Где 25 — километры, 90 — минуты."
+        "Где:\n"
+        "25 — километры\n"
+        "90 — минуты\n\n"
+        "Можно и с датой:\n"
+        "2026-04-08 25 90 вечерний заезд\n\n"
+        "Ниже кнопки. Всё просто, без магии. Хотя немного магии всё-таки есть."
     )
 
 
@@ -264,6 +272,20 @@ def regular_start_text() -> str:
         "🚴 Бот на месте.\n"
         "Можно добавить поездку сообщением: 25 90\n"
         "Или открыть нужный раздел кнопками ниже."
+    )
+
+
+def help_text() -> str:
+    return (
+        "➕ Как добавить поездку\n\n"
+        "Самый быстрый вариант:\n"
+        "25 90\n\n"
+        "Где 25 — километры, 90 — минуты.\n\n"
+        "Можно добавить дату и заметку:\n"
+        "2026-04-08 25 90 вечерний\n\n"
+        "Форматы такие:\n"
+        "• км минуты\n"
+        "• YYYY-MM-DD км минуты заметка"
     )
 
 
@@ -400,7 +422,10 @@ def edit_intro_text(user_id: int, offset: int) -> str:
     if not rows:
         return "✏️ Исправить\nПока нет заездов для редактирования."
 
-    lines = ["✏️ Исправить", "Выбери номер заезда, который хочешь изменить или удалить."]
+    lines = [
+        "✏️ Исправить",
+        "Сначала выбери номер заезда, который хочешь изменить или удалить."
+    ]
     for idx, r in enumerate(rows):
         num = ride_global_number(total, offset, idx)
         lines.append(f"{num}. {r['date']} | {float(r['km']):.1f} км")
@@ -520,10 +545,12 @@ def reset_kb(offset: int) -> InlineKeyboardMarkup:
 # ---------- HANDLERS ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    created = ensure_user(update.effective_user.id)
+    user = update.effective_user
+    created = ensure_user(user.id)
     clear_edit_state(context)
+
     await update.message.reply_text(
-        first_start_text() if created else regular_start_text(),
+        first_start_text(user.first_name) if created else regular_start_text(),
         reply_markup=main_kb(),
     )
 
@@ -639,10 +666,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "help":
         clear_edit_state(context)
         await query.message.reply_text(
-            "Чтобы добавить поездку, просто пришли сообщение:\n"
-            "25 90\n\n"
-            "Или с датой:\n"
-            "2026-04-08 25 90 вечерний",
+            help_text(),
             reply_markup=main_kb(),
         )
         return
