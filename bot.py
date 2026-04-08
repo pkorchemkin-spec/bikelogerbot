@@ -67,28 +67,24 @@ def init():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS rides (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            km REAL NOT NULL,
-            min INTEGER NOT NULL,
-            note TEXT DEFAULT ''
-        )
-        """
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS rides (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        km REAL NOT NULL,
+        min INTEGER NOT NULL,
+        note TEXT DEFAULT ''
     )
+    """)
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS maintenance (
-            user_id INTEGER PRIMARY KEY,
-            last_lube REAL NOT NULL DEFAULT 0,
-            last_chain REAL NOT NULL DEFAULT 0
-        )
-        """
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS maintenance (
+        user_id INTEGER PRIMARY KEY,
+        last_lube REAL NOT NULL DEFAULT 0,
+        last_chain REAL NOT NULL DEFAULT 0
     )
+    """)
 
     conn.commit()
     conn.close()
@@ -235,6 +231,13 @@ def get_maintenance(user_id: int):
     ).fetchone()
     conn.close()
     return row
+
+
+# ---------- STATE ----------
+
+def clear_edit_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("pending_edit_ride_id", None)
+    context.user_data.pop("pending_edit_offset", None)
 
 
 # ---------- TEXT ----------
@@ -405,7 +408,7 @@ def edit_intro_text(user_id: int, offset: int) -> str:
 
 
 def edit_action_text(ride, number: int) -> str:
-    note = f"\nЗаметка: {ride['note']}" if ride['note'] else ""
+    note = f"\nЗаметка: {ride['note']}" if ride["note"] else ""
     return (
         f"Заезд №{number}\n"
         f"Дата: {ride['date']}\n"
@@ -471,7 +474,12 @@ def edit_select_kb(user_id: int, offset: int) -> InlineKeyboardMarkup:
     number_row = []
     for idx, ride in enumerate(rows):
         number = ride_global_number(total, offset, idx)
-        number_row.append(InlineKeyboardButton(str(number), callback_data=f"edit_pick:{ride['id']}:{offset}:{number}"))
+        number_row.append(
+            InlineKeyboardButton(
+                str(number),
+                callback_data=f"edit_pick:{ride['id']}:{offset}:{number}"
+            )
+        )
     if number_row:
         buttons.append(number_row)
 
@@ -490,7 +498,7 @@ def edit_action_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
 def service_kb(offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💾 Бэкап", callback_data="backup")],
-        [InlineKeyboardButton("🧨 Сброс", callback_data="reset")],
+        [InlineKeyboardButton("🧨 Сброс", callback_data=f"reset:{offset}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"rides:{offset}")],
     ])
 
@@ -504,7 +512,7 @@ def delete_confirm_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
 
 def reset_kb(offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔴 Да, удалить всё", callback_data="reset_yes")],
+        [InlineKeyboardButton("🔴 Да, удалить всё", callback_data=f"reset_yes:{offset}")],
         [InlineKeyboardButton("⚪ Отмена", callback_data=f"service_menu:{offset}")],
     ])
 
@@ -513,6 +521,7 @@ def reset_kb(offset: int) -> InlineKeyboardMarkup:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     created = ensure_user(update.effective_user.id)
+    clear_edit_state(context)
     await update.message.reply_text(
         first_start_text() if created else regular_start_text(),
         reply_markup=main_kb(),
@@ -532,7 +541,20 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     parts = text.split()
 
-    if pending_edit_id:
+    is_new_ride_input = False
+    try:
+        if len(parts) >= 2 and not looks_like_date(parts[0]):
+            parse_float(parts[0])
+            parse_int(parts[1])
+            is_new_ride_input = True
+        elif len(parts) >= 3 and looks_like_date(parts[0]):
+            parse_float(parts[1])
+            parse_int(parts[2])
+            is_new_ride_input = True
+    except Exception:
+        is_new_ride_input = False
+
+    if pending_edit_id and not is_new_ride_input:
         try:
             if len(parts) < 3 or not looks_like_date(parts[0]):
                 raise ValueError
@@ -548,9 +570,7 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         changed = update_ride(user_id, pending_edit_id, ride_date, km, minutes, note)
-
-        context.user_data.pop("pending_edit_ride_id", None)
-        context.user_data.pop("pending_edit_offset", None)
+        clear_edit_state(context)
 
         if not changed:
             await update.message.reply_text(
@@ -589,6 +609,7 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         return
 
+    clear_edit_state(context)
     add_ride(user_id, ride_date, km, minutes, note)
 
     await update.message.reply_text(
@@ -608,6 +629,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "menu":
+        clear_edit_state(context)
         await query.message.reply_text(
             regular_start_text(),
             reply_markup=main_kb(),
@@ -615,6 +637,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "help":
+        clear_edit_state(context)
         await query.message.reply_text(
             "Чтобы добавить поездку, просто пришли сообщение:\n"
             "25 90\n\n"
@@ -625,6 +648,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "summary":
+        clear_edit_state(context)
         await query.message.reply_text(
             summary_text(user_id),
             reply_markup=main_kb(),
@@ -632,6 +656,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "trans":
+        clear_edit_state(context)
         await query.message.reply_text(
             transmission_text(user_id),
             reply_markup=main_kb(),
@@ -639,6 +664,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("rides:"):
+        clear_edit_state(context)
         offset = int(query.data.split(":")[1])
         await query.message.reply_text(
             rides_text(user_id, offset),
@@ -647,6 +673,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("edit_menu:"):
+        clear_edit_state(context)
         offset = int(query.data.split(":")[1])
         await query.message.reply_text(
             edit_intro_text(user_id, offset),
@@ -719,6 +746,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("delete_yes:"):
+        clear_edit_state(context)
         _, ride_id_str, offset_str = query.data.split(":")
         ride_id = int(ride_id_str)
         offset = int(offset_str)
@@ -740,6 +768,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("service_menu:"):
+        clear_edit_state(context)
         offset = int(query.data.split(":")[1])
         await query.message.reply_text(
             service_intro_text(),
@@ -748,6 +777,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "backup":
+        clear_edit_state(context)
         rides = [dict(r) for r in all_rides(user_id)]
         payload = {
             "user_id": user_id,
@@ -771,17 +801,17 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(filename)
         return
 
-    if query.data == "reset":
-        offset = 0
-        if context.user_data.get("pending_edit_offset") is not None:
-            offset = context.user_data.get("pending_edit_offset", 0)
+    if query.data.startswith("reset:"):
+        clear_edit_state(context)
+        offset = int(query.data.split(":")[1])
         await query.message.reply_text(
             reset_warning_text(),
             reply_markup=reset_kb(offset),
         )
         return
 
-    if query.data == "reset_yes":
+    if query.data.startswith("reset_yes:"):
+        clear_edit_state(context)
         reset_user_data(user_id)
         await query.message.reply_text(
             "Всё очищено. Начинаем с чистого листа.",
