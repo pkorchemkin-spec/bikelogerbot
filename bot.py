@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -214,6 +215,38 @@ def main_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _menu_key(chat_id: int, user_id: int) -> str:
+    return f"{chat_id}:{user_id}"
+
+
+async def clear_previous_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
+    last_message_id = context.bot_data.get(_menu_key(chat_id, user_id))
+    if not last_message_id:
+        return
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=last_message_id,
+            reply_markup=None,
+        )
+    except BadRequest:
+        pass
+
+
+async def send_with_fresh_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    await clear_previous_menu(context, chat_id, user_id)
+
+    if update.callback_query:
+        sent = await update.callback_query.message.reply_text(text,  **kwargs)
+    else:
+        sent = await update.message.reply_text(text,  **kwargs)
+
+    context.bot_data[_menu_key(chat_id, user_id)] = sent.message_id
+    return sent
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     ensure_user_settings(user_id)
@@ -228,7 +261,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/set_chain_interval 150\n\n"
         "Жми кнопки ниже или просто присылай пробег и минуты сообщением."
     )
-    await update.message.reply_text(text, reply_markup=main_keyboard())
+    await send_with_fresh_menu(update, context, text)
 
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,7 +272,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "Нужно так: /add YYYY-MM-DD км минуты заметка\n"
             "Пример: /add 2026-04-08 24.6 82 вечерняя_поездка",
-            reply_markup=main_keyboard(),
+            
         )
         return
 
@@ -252,7 +285,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except ValueError:
         await update.message.reply_text(
             "Проверь формат. Пример: /add 2026-04-08 24.6 82 вечерняя_поездка",
-            reply_markup=main_keyboard(),
+            
         )
         return
 
@@ -262,7 +295,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Записал.\nДата: {ride_date}\nПробег: {distance_km:.1f} км\nВремя: {duration_min} мин\n"
         f"Общий пробег: {odo:.1f} км\n\n{chain_note}",
-        reply_markup=main_keyboard(),
+        
     )
 
 
@@ -279,9 +312,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Средний заезд: {average:.1f} км"
     )
     if update.message:
-        await update.message.reply_text(text, reply_markup=main_keyboard())
+        await send_with_fresh_menu(update, context, text)
     elif update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=main_keyboard())
+        await send_with_fresh_menu(update, context, text)
 
 
 async def list_rides(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -298,17 +331,17 @@ async def list_rides(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         text = "\n".join(lines)
 
     if update.message:
-        await update.message.reply_text(text, reply_markup=main_keyboard())
+        await send_with_fresh_menu(update, context, text)
     elif update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=main_keyboard())
+        await send_with_fresh_menu(update, context, text)
 
 
 async def service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = service_status_text(update.effective_user.id)
     if update.message:
-        await update.message.reply_text(text, reply_markup=main_keyboard())
+        await send_with_fresh_menu(update, context, text)
     elif update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=main_keyboard())
+        await send_with_fresh_menu(update, context, text)
 
 
 async def chain_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -316,7 +349,7 @@ async def chain_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     odo = mark_chain_serviced(user_id)
     await update.message.reply_text(
         f"Готово. Смазку цепи отметил на пробеге {odo:.1f} км.",
-        reply_markup=main_keyboard(),
+        
     )
 
 
@@ -330,14 +363,14 @@ async def set_chain_interval(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except ValueError:
         await update.message.reply_text(
             "Интервал должен быть числом. Пример: /set_chain_interval 150",
-            reply_markup=main_keyboard(),
+            
         )
         return
 
     set_service_interval(user_id, interval)
     await update.message.reply_text(
         f"Новый интервал смазки цепи: {interval:.1f} км",
-        reply_markup=main_keyboard(),
+        
     )
 
 
@@ -350,9 +383,9 @@ async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         text = f"Последнюю поездку удалил. Новый общий пробег: {total_distance(user_id):.1f} км"
 
     if update.message:
-        await update.message.reply_text(text, reply_markup=main_keyboard())
+        await send_with_fresh_menu(update, context, text)
     elif update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=main_keyboard())
+        await send_with_fresh_menu(update, context, text)
 
 
 def short_chain_warning(user_id: int) -> str:
@@ -399,8 +432,10 @@ async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     target = update.message if update.message else update.callback_query.message
     with open(filename, "rb") as f:
-        await target.reply_document(document=f, filename=filename, caption="Вот твой бэкап. На всякий пожарный, пока цепь не скрипит.", reply_markup=main_keyboard())
+        await clear_previous_menu(context, update.effective_chat.id, update.effective_user.id)
+    sent = await target.reply_document(document=f, filename=filename, caption="Вот твой бэкап. На всякий пожарный, пока цепь не скрипит.", reply_markup=main_keyboard())
 
+        context.bot_data[_menu_key(update.effective_chat.id, update.effective_user.id)] = sent.message_id
     os.remove(filename)
 
 
@@ -435,7 +470,7 @@ async def handle_quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(
         f"Записал быстро.\nДата: {ride_date}\nПробег: {distance_km:.1f} км\nВремя: {duration_min} мин\n"
         f"Общий пробег: {odo:.1f} км\n\n{short_chain_warning(update.effective_user.id)}",
-        reply_markup=main_keyboard(),
+        
     )
 
 
@@ -473,7 +508,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data == "menu_add":
         await query.message.reply_text(
             "Пришли сообщением так:\n25 90\nили\n2026-04-08 25 90 вечерняя",
-            reply_markup=main_keyboard(),
+            
         )
 
 
