@@ -67,24 +67,28 @@ def init():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS rides (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        date TEXT NOT NULL,
-        km REAL NOT NULL,
-        min INTEGER NOT NULL,
-        note TEXT DEFAULT ''
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rides (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            km REAL NOT NULL,
+            min INTEGER NOT NULL,
+            note TEXT DEFAULT ''
+        )
+        """
     )
-    """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS maintenance (
-        user_id INTEGER PRIMARY KEY,
-        last_lube REAL NOT NULL DEFAULT 0,
-        last_chain REAL NOT NULL DEFAULT 0
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS maintenance (
+            user_id INTEGER PRIMARY KEY,
+            last_lube REAL NOT NULL DEFAULT 0,
+            last_chain REAL NOT NULL DEFAULT 0
+        )
+        """
     )
-    """)
 
     conn.commit()
     conn.close()
@@ -361,6 +365,10 @@ def transmission_text(user_id: int) -> str:
     )
 
 
+def ride_global_number(total: int, offset: int, index_on_page: int) -> int:
+    return total - offset - index_on_page
+
+
 def rides_text(user_id: int, offset: int) -> str:
     rows = rides_page(user_id, offset)
     total = rides_count(user_id)
@@ -368,18 +376,53 @@ def rides_text(user_id: int, offset: int) -> str:
     if not rows:
         return "📚 Статистика\nПока нет заездов."
 
-    start_idx = offset + 1
-    end_idx = offset + len(rows)
+    start_num = ride_global_number(total, offset, 0)
+    end_num = ride_global_number(total, offset, len(rows) - 1)
 
-    lines = [f"📚 Статистика\nПоказаны заезды {start_idx}-{end_idx} из {total}"]
+    lines = [f"📚 Статистика\nПоказаны заезды {start_num}-{end_num} из {total}"]
 
-    for r in rows:
+    for idx, r in enumerate(rows):
+        num = ride_global_number(total, offset, idx)
         lines.append(
-            f"\n{r['date']} | {float(r['km']):.1f} км | {format_time(int(r['min']))} | "
+            f"\n{num}. {r['date']} | {float(r['km']):.1f} км | {format_time(int(r['min']))} | "
             f"{avg_speed(float(r['km']), int(r['min'])):.1f} км/ч"
         )
 
     return "\n".join(lines)
+
+
+def edit_intro_text(user_id: int, offset: int) -> str:
+    rows = rides_page(user_id, offset)
+    total = rides_count(user_id)
+    if not rows:
+        return "✏️ Исправить\nПока нет заездов для редактирования."
+
+    lines = ["✏️ Исправить", "Выбери номер заезда, который хочешь изменить или удалить."]
+    for idx, r in enumerate(rows):
+        num = ride_global_number(total, offset, idx)
+        lines.append(f"{num}. {r['date']} | {float(r['km']):.1f} км")
+    return "\n".join(lines)
+
+
+def edit_action_text(ride, number: int) -> str:
+    note = f"\nЗаметка: {ride['note']}" if ride['note'] else ""
+    return (
+        f"Заезд №{number}\n"
+        f"Дата: {ride['date']}\n"
+        f"Дистанция: {float(ride['km']):.1f} км\n"
+        f"Время: {format_time(int(ride['min']))}\n"
+        f"Средняя скорость: {avg_speed(float(ride['km']), int(ride['min'])):.1f} км/ч"
+        f"{note}\n\n"
+        "Что сделать с этим заездом?"
+    )
+
+
+def service_intro_text() -> str:
+    return (
+        "⚙️ Сброс / Бэкап\n"
+        "Здесь можно сохранить свои данные или полностью очистить статистику.\n"
+        "Сброс удалит все заезды без возможности восстановления."
+    )
 
 
 def reset_warning_text() -> str:
@@ -400,22 +443,8 @@ def main_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def rides_kb(offset: int, total: int, ride_rows) -> InlineKeyboardMarkup:
+def rides_kb(offset: int, total: int) -> InlineKeyboardMarkup:
     rows = []
-
-    for ride in ride_rows:
-        rows.append([
-            InlineKeyboardButton(
-                f"✏️ Изменить {ride['date']} · {float(ride['km']):.1f} км",
-                callback_data=f"edit:{ride['id']}:{offset}",
-            )
-        ])
-        rows.append([
-            InlineKeyboardButton(
-                f"🗑 Удалить {ride['date']} · {float(ride['km']):.1f} км",
-                callback_data=f"delete_confirm:{ride['id']}:{offset}",
-            )
-        ])
 
     nav = []
     if offset > 0:
@@ -424,25 +453,59 @@ def rides_kb(offset: int, total: int, ride_rows) -> InlineKeyboardMarkup:
         nav.append(InlineKeyboardButton("➡️", callback_data=f"rides:{offset + RIDES_PAGE_SIZE}"))
     if nav:
         rows.append(nav)
+    else:
+        rows.append([InlineKeyboardButton("·", callback_data="noop")])
 
-    rows.append([InlineKeyboardButton("💾 Бэкап", callback_data="backup")])
-    rows.append([InlineKeyboardButton("🧨 Сбросить ВСЮ статистику", callback_data="reset")])
+    rows.append([InlineKeyboardButton("✏️ Исправить", callback_data=f"edit_menu:{offset}")])
+    rows.append([InlineKeyboardButton("⚙️ Сброс / Бэкап", callback_data=f"service_menu:{offset}")])
     rows.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu")])
 
     return InlineKeyboardMarkup(rows)
 
 
-def delete_confirm_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
+def edit_select_kb(user_id: int, offset: int) -> InlineKeyboardMarkup:
+    rows = rides_page(user_id, offset)
+    total = rides_count(user_id)
+    buttons = []
+
+    number_row = []
+    for idx, ride in enumerate(rows):
+        number = ride_global_number(total, offset, idx)
+        number_row.append(InlineKeyboardButton(str(number), callback_data=f"edit_pick:{ride['id']}:{offset}:{number}"))
+    if number_row:
+        buttons.append(number_row)
+
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"rides:{offset}")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def edit_action_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔴 Да, удалить", callback_data=f"delete_yes:{ride_id}:{offset}")],
-        [InlineKeyboardButton("⚪ Отмена", callback_data=f"rides:{offset}")],
+        [InlineKeyboardButton("✏️ Изменить", callback_data=f"edit_do:{ride_id}:{offset}")],
+        [InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_confirm:{ride_id}:{offset}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"edit_menu:{offset}")],
     ])
 
 
-def reset_kb() -> InlineKeyboardMarkup:
+def service_kb(offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💾 Бэкап", callback_data="backup")],
+        [InlineKeyboardButton("🧨 Сброс", callback_data="reset")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"rides:{offset}")],
+    ])
+
+
+def delete_confirm_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔴 Да, удалить", callback_data=f"delete_yes:{ride_id}:{offset}")],
+        [InlineKeyboardButton("⚪ Отмена", callback_data=f"edit_menu:{offset}")],
+    ])
+
+
+def reset_kb(offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔴 Да, удалить всё", callback_data="reset_yes")],
-        [InlineKeyboardButton("⚪ Отмена", callback_data="rides:0")],
+        [InlineKeyboardButton("⚪ Отмена", callback_data=f"service_menu:{offset}")],
     ])
 
 
@@ -478,10 +541,9 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             minutes = parse_int(parts[2])
             note = " ".join(parts[3:]) if len(parts) > 3 else ""
         except Exception:
-            current_rows = rides_page(user_id, pending_edit_offset)
             await update.message.reply_text(
                 "Для редактирования пришли так:\nYYYY-MM-DD км минуты заметка",
-                reply_markup=rides_kb(pending_edit_offset, rides_count(user_id), current_rows),
+                reply_markup=edit_action_kb(pending_edit_id, pending_edit_offset),
             )
             return
 
@@ -490,12 +552,10 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("pending_edit_ride_id", None)
         context.user_data.pop("pending_edit_offset", None)
 
-        current_rows = rides_page(user_id, pending_edit_offset)
-
         if not changed:
             await update.message.reply_text(
                 "Не смог обновить этот заезд.",
-                reply_markup=rides_kb(pending_edit_offset, rides_count(user_id), current_rows),
+                reply_markup=rides_kb(pending_edit_offset, rides_count(user_id)),
             )
             return
 
@@ -505,7 +565,11 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Дистанция: {km:.1f} км\n"
             f"Время: {format_time(minutes)}\n"
             f"Средняя скорость: {avg_speed(km, minutes):.1f} км/ч",
-            reply_markup=rides_kb(pending_edit_offset, rides_count(user_id), current_rows),
+            reply_markup=rides_kb(pending_edit_offset, rides_count(user_id)),
+        )
+        await update.message.reply_text(
+            rides_text(user_id, pending_edit_offset),
+            reply_markup=rides_kb(pending_edit_offset, rides_count(user_id)),
         )
         return
 
@@ -540,6 +604,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     ensure_user(user_id)
 
+    if query.data == "noop":
+        return
+
     if query.data == "menu":
         await query.message.reply_text(
             regular_start_text(),
@@ -573,25 +640,50 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("rides:"):
         offset = int(query.data.split(":")[1])
-        rows = rides_page(user_id, offset)
         await query.message.reply_text(
             rides_text(user_id, offset),
-            reply_markup=rides_kb(offset, rides_count(user_id), rows),
+            reply_markup=rides_kb(offset, rides_count(user_id)),
         )
         return
 
-    if query.data.startswith("edit:"):
+    if query.data.startswith("edit_menu:"):
+        offset = int(query.data.split(":")[1])
+        await query.message.reply_text(
+            edit_intro_text(user_id, offset),
+            reply_markup=edit_select_kb(user_id, offset),
+        )
+        return
+
+    if query.data.startswith("edit_pick:"):
+        _, ride_id_str, offset_str, number_str = query.data.split(":")
+        ride_id = int(ride_id_str)
+        offset = int(offset_str)
+        number = int(number_str)
+
+        ride = get_ride(user_id, ride_id)
+        if not ride:
+            await query.message.reply_text(
+                "Не нашёл этот заезд.",
+                reply_markup=edit_select_kb(user_id, offset),
+            )
+            return
+
+        await query.message.reply_text(
+            edit_action_text(ride, number),
+            reply_markup=edit_action_kb(ride_id, offset),
+        )
+        return
+
+    if query.data.startswith("edit_do:"):
         _, ride_id_str, offset_str = query.data.split(":")
         ride_id = int(ride_id_str)
         offset = int(offset_str)
 
         ride = get_ride(user_id, ride_id)
-        current_rows = rides_page(user_id, offset)
-
         if not ride:
             await query.message.reply_text(
                 "Не нашёл этот заезд.",
-                reply_markup=rides_kb(offset, rides_count(user_id), current_rows),
+                reply_markup=edit_select_kb(user_id, offset),
             )
             return
 
@@ -603,7 +695,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пришли новые данные одним сообщением:\n"
             "YYYY-MM-DD км минуты заметка\n\n"
             f"Сейчас: {ride['date']} {float(ride['km']):.1f} {int(ride['min'])} {note_text}",
-            reply_markup=rides_kb(offset, rides_count(user_id), current_rows),
+            reply_markup=edit_action_kb(ride_id, offset),
         )
         return
 
@@ -614,10 +706,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         ride = get_ride(user_id, ride_id)
         if not ride:
-            current_rows = rides_page(user_id, offset)
             await query.message.reply_text(
                 "Не нашёл этот заезд.",
-                reply_markup=rides_kb(offset, rides_count(user_id), current_rows),
+                reply_markup=edit_select_kb(user_id, offset),
             )
             return
 
@@ -638,15 +729,21 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if offset >= total and offset > 0:
             offset = max(0, offset - RIDES_PAGE_SIZE)
 
-        rows = rides_page(user_id, offset)
-
         await query.message.reply_text(
             "Заезд удалил.",
-            reply_markup=rides_kb(offset, rides_count(user_id), rows),
+            reply_markup=rides_kb(offset, rides_count(user_id)),
         )
         await query.message.reply_text(
             rides_text(user_id, offset),
-            reply_markup=rides_kb(offset, rides_count(user_id), rows),
+            reply_markup=rides_kb(offset, rides_count(user_id)),
+        )
+        return
+
+    if query.data.startswith("service_menu:"):
+        offset = int(query.data.split(":")[1])
+        await query.message.reply_text(
+            service_intro_text(),
+            reply_markup=service_kb(offset),
         )
         return
 
@@ -675,9 +772,12 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "reset":
+        offset = 0
+        if context.user_data.get("pending_edit_offset") is not None:
+            offset = context.user_data.get("pending_edit_offset", 0)
         await query.message.reply_text(
             reset_warning_text(),
-            reply_markup=reset_kb(),
+            reply_markup=reset_kb(offset),
         )
         return
 
