@@ -116,6 +116,46 @@ def add_ride(user_id: int, ride_date: str, km: float, minutes: int, note: str = 
     conn.close()
 
 
+def update_ride(user_id: int, ride_id: int, ride_date: str, km: float, minutes: int, note: str = "") -> bool:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE rides
+        SET date = ?, km = ?, min = ?, note = ?
+        WHERE user_id = ? AND id = ?
+        """,
+        (ride_date, km, minutes, note, user_id, ride_id),
+    )
+    changed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def delete_ride(user_id: int, ride_id: int) -> bool:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM rides WHERE user_id = ? AND id = ?",
+        (user_id, ride_id),
+    )
+    changed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def get_ride(user_id: int, ride_id: int):
+    conn = db()
+    row = conn.execute(
+        "SELECT * FROM rides WHERE user_id = ? AND id = ?",
+        (user_id, ride_id),
+    ).fetchone()
+    conn.close()
+    return row
+
+
 def total_km(user_id: int) -> float:
     conn = db()
     value = conn.execute(
@@ -230,7 +270,7 @@ def praise_text(km: float) -> str:
     return "Даже короткий выезд — всё равно движение вперёд."
 
 
-def maintenance_warning_text(user_id: int) -> str | None:
+def maintenance_warning_text(user_id: int):
     row = get_maintenance(user_id)
     if row is None:
         return None
@@ -360,8 +400,22 @@ def main_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def rides_kb(offset: int, total: int) -> InlineKeyboardMarkup:
+def rides_kb(offset: int, total: int, ride_rows) -> InlineKeyboardMarkup:
     rows = []
+
+    for ride in ride_rows:
+        rows.append([
+            InlineKeyboardButton(
+                f"✏️ Изменить {ride['date']} · {float(ride['km']):.1f} км",
+                callback_data=f"edit:{ride['id']}:{offset}",
+            )
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                f"🗑 Удалить {ride['date']} · {float(ride['km']):.1f} км",
+                callback_data=f"delete_confirm:{ride['id']}:{offset}",
+            )
+        ])
 
     nav = []
     if offset > 0:
@@ -376,6 +430,13 @@ def rides_kb(offset: int, total: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu")])
 
     return InlineKeyboardMarkup(rows)
+
+
+def delete_confirm_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔴 Да, удалить", callback_data=f"delete_yes:{ride_id}:{offset}")],
+        [InlineKeyboardButton("⚪ Отмена", callback_data=f"rides:{offset}")],
+    ])
 
 
 def reset_kb() -> InlineKeyboardMarkup:
@@ -400,7 +461,53 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("/"):
         return
 
+    user_id = update.effective_user.id
+    ensure_user(user_id)
+
+    pending_edit_id = context.user_data.get("pending_edit_ride_id")
+    pending_edit_offset = context.user_data.get("pending_edit_offset", 0)
+
     parts = text.split()
+
+    if pending_edit_id:
+        try:
+            if len(parts) < 3 or not looks_like_date(parts[0]):
+                raise ValueError
+            ride_date = parts[0]
+            km = parse_float(parts[1])
+            minutes = parse_int(parts[2])
+            note = " ".join(parts[3:]) if len(parts) > 3 else ""
+        except Exception:
+            current_rows = rides_page(user_id, pending_edit_offset)
+            await update.message.reply_text(
+                "Для редактирования пришли так:\nYYYY-MM-DD км минуты заметка",
+                reply_markup=rides_kb(pending_edit_offset, rides_count(user_id), current_rows),
+            )
+            return
+
+        changed = update_ride(user_id, pending_edit_id, ride_date, km, minutes, note)
+
+        context.user_data.pop("pending_edit_ride_id", None)
+        context.user_data.pop("pending_edit_offset", None)
+
+        current_rows = rides_page(user_id, pending_edit_offset)
+
+        if not changed:
+            await update.message.reply_text(
+                "Не смог обновить этот заезд.",
+                reply_markup=rides_kb(pending_edit_offset, rides_count(user_id), current_rows),
+            )
+            return
+
+        await update.message.reply_text(
+            "Заезд обновил.\n"
+            f"Дата: {ride_date}\n"
+            f"Дистанция: {km:.1f} км\n"
+            f"Время: {format_time(minutes)}\n"
+            f"Средняя скорость: {avg_speed(km, minutes):.1f} км/ч",
+            reply_markup=rides_kb(pending_edit_offset, rides_count(user_id), current_rows),
+        )
+        return
 
     try:
         if len(parts) >= 2 and not looks_like_date(parts[0]):
@@ -418,8 +525,6 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         return
 
-    user_id = update.effective_user.id
-    ensure_user(user_id)
     add_ride(user_id, ride_date, km, minutes, note)
 
     await update.message.reply_text(
@@ -468,9 +573,80 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("rides:"):
         offset = int(query.data.split(":")[1])
+        rows = rides_page(user_id, offset)
         await query.message.reply_text(
             rides_text(user_id, offset),
-            reply_markup=rides_kb(offset, rides_count(user_id)),
+            reply_markup=rides_kb(offset, rides_count(user_id), rows),
+        )
+        return
+
+    if query.data.startswith("edit:"):
+        _, ride_id_str, offset_str = query.data.split(":")
+        ride_id = int(ride_id_str)
+        offset = int(offset_str)
+
+        ride = get_ride(user_id, ride_id)
+        current_rows = rides_page(user_id, offset)
+
+        if not ride:
+            await query.message.reply_text(
+                "Не нашёл этот заезд.",
+                reply_markup=rides_kb(offset, rides_count(user_id), current_rows),
+            )
+            return
+
+        context.user_data["pending_edit_ride_id"] = ride_id
+        context.user_data["pending_edit_offset"] = offset
+
+        note_text = ride["note"] if ride["note"] else ""
+        await query.message.reply_text(
+            "Пришли новые данные одним сообщением:\n"
+            "YYYY-MM-DD км минуты заметка\n\n"
+            f"Сейчас: {ride['date']} {float(ride['km']):.1f} {int(ride['min'])} {note_text}",
+            reply_markup=rides_kb(offset, rides_count(user_id), current_rows),
+        )
+        return
+
+    if query.data.startswith("delete_confirm:"):
+        _, ride_id_str, offset_str = query.data.split(":")
+        ride_id = int(ride_id_str)
+        offset = int(offset_str)
+
+        ride = get_ride(user_id, ride_id)
+        if not ride:
+            current_rows = rides_page(user_id, offset)
+            await query.message.reply_text(
+                "Не нашёл этот заезд.",
+                reply_markup=rides_kb(offset, rides_count(user_id), current_rows),
+            )
+            return
+
+        await query.message.reply_text(
+            "Удалить этот заезд?",
+            reply_markup=delete_confirm_kb(ride_id, offset),
+        )
+        return
+
+    if query.data.startswith("delete_yes:"):
+        _, ride_id_str, offset_str = query.data.split(":")
+        ride_id = int(ride_id_str)
+        offset = int(offset_str)
+
+        delete_ride(user_id, ride_id)
+
+        total = rides_count(user_id)
+        if offset >= total and offset > 0:
+            offset = max(0, offset - RIDES_PAGE_SIZE)
+
+        rows = rides_page(user_id, offset)
+
+        await query.message.reply_text(
+            "Заезд удалил.",
+            reply_markup=rides_kb(offset, rides_count(user_id), rows),
+        )
+        await query.message.reply_text(
+            rides_text(user_id, offset),
+            reply_markup=rides_kb(offset, rides_count(user_id), rows),
         )
         return
 
