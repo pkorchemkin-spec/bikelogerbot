@@ -1,6 +1,3 @@
-# FINAL VERSION WITH ALL REQUESTED FEATURES
-# (clean, stable, human-readable)
-
 import os
 import sqlite3
 import json
@@ -21,18 +18,42 @@ DEFAULT_LUBE_INTERVAL_KM = 250
 DEFAULT_CHAIN_REPLACE_INTERVAL_KM = 500
 RIDES_PAGE_SIZE = 5
 
+
 # ---------- UTILS ----------
 
 def format_time(minutes: int) -> str:
-    h = minutes // 60
-    m = minutes % 60
-    if h == 0:
-        return f"{m}м"
-    return f"{h}ч {m:02d}м"
+    hours = minutes // 60
+    mins = minutes % 60
+    if hours == 0:
+        return f"{mins}м"
+    return f"{hours}ч {mins:02d}м"
 
 
-def avg_speed(km, minutes):
-    return 0 if minutes == 0 else km / (minutes / 60)
+def avg_speed(km: float, minutes: int) -> float:
+    if minutes <= 0:
+        return 0.0
+    return km / (minutes / 60)
+
+
+def today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def parse_float(value: str) -> float:
+    return float(value.replace(",", "."))
+
+
+def parse_int(value: str) -> int:
+    return int(value)
+
+
+def looks_like_date(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
 
 # ---------- DB ----------
 
@@ -43,57 +64,294 @@ def db():
 
 
 def init():
-    c = db()
-    cur = c.cursor()
+    conn = db()
+    cur = conn.cursor()
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS rides (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        date TEXT,
-        km REAL,
-        min INTEGER,
-        note TEXT
-    )""")
+        user_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        km REAL NOT NULL,
+        min INTEGER NOT NULL,
+        note TEXT DEFAULT ''
+    )
+    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS maintenance (
         user_id INTEGER PRIMARY KEY,
-        last_lube REAL DEFAULT 0,
-        last_chain REAL DEFAULT 0
-    )""")
+        last_lube REAL NOT NULL DEFAULT 0,
+        last_chain REAL NOT NULL DEFAULT 0
+    )
+    """)
 
-    c.commit()
-    c.close()
+    conn.commit()
+    conn.close()
+
+
+def ensure_user(user_id: int) -> bool:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO maintenance (user_id, last_lube, last_chain) VALUES (?, 0, 0)",
+        (user_id,),
+    )
+    created = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return created
+
 
 # ---------- DATA ----------
 
-def add(user, date, km, m, note=""):
-    c = db()
-    c.execute("INSERT INTO rides (user_id,date,km,min,note) VALUES (?,?,?,?,?)",
-              (user, date, km, m, note))
-    c.commit()
-    c.close()
+def add_ride(user_id: int, ride_date: str, km: float, minutes: int, note: str = "") -> None:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO rides (user_id, date, km, min, note) VALUES (?, ?, ?, ?, ?)",
+        (user_id, ride_date, km, minutes, note),
+    )
+    conn.commit()
+    conn.close()
 
 
-def total_km(user):
-    return db().execute("SELECT COALESCE(SUM(km),0) FROM rides WHERE user_id=?", (user,)).fetchone()[0]
+def total_km(user_id: int) -> float:
+    conn = db()
+    value = conn.execute(
+        "SELECT COALESCE(SUM(km), 0) FROM rides WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()[0]
+    conn.close()
+    return float(value)
 
 
-def total_time(user):
-    return db().execute("SELECT COALESCE(SUM(min),0) FROM rides WHERE user_id=?", (user,)).fetchone()[0]
+def total_time(user_id: int) -> int:
+    conn = db()
+    value = conn.execute(
+        "SELECT COALESCE(SUM(min), 0) FROM rides WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()[0]
+    conn.close()
+    return int(value)
 
 
-def count(user):
-    return db().execute("SELECT COUNT(*) FROM rides WHERE user_id=?", (user,)).fetchone()[0]
+def rides_count(user_id: int) -> int:
+    conn = db()
+    value = conn.execute(
+        "SELECT COUNT(*) FROM rides WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()[0]
+    conn.close()
+    return int(value)
 
 
-def all_rides(user):
-    return db().execute("SELECT * FROM rides WHERE user_id=? ORDER BY date DESC,id DESC", (user,)).fetchall()
+def all_rides(user_id: int):
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM rides WHERE user_id = ? ORDER BY date DESC, id DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def rides_page(user_id: int, offset: int, limit: int = RIDES_PAGE_SIZE):
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT * FROM rides
+        WHERE user_id = ?
+        ORDER BY date DESC, id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (user_id, limit, offset),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def reset_user_data(user_id: int) -> None:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM rides WHERE user_id = ?", (user_id,))
+    cur.execute(
+        "UPDATE maintenance SET last_lube = 0, last_chain = 0 WHERE user_id = ?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_maintenance(user_id: int):
+    conn = db()
+    row = conn.execute(
+        "SELECT * FROM maintenance WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+# ---------- TEXT ----------
+
+def first_start_text() -> str:
+    return (
+        "🚴 Привет. Это веложурнал-одометр.\n\n"
+        "Он нужен, чтобы вручную записывать поездки без GPS, считать общий пробег "
+        "и держать обслуживание велосипеда под контролем.\n\n"
+        "Что умеет бот:\n"
+        "• добавлять заезды вручную\n"
+        "• считать общий километраж и общее время\n"
+        "• показывать краткую сводку\n"
+        "• хранить историю поездок\n"
+        "• делать бэкап\n\n"
+        "Как быстро добавить поездку:\n"
+        "25 90\n\n"
+        "Где 25 — километры, 90 — минуты."
+    )
+
+
+def regular_start_text() -> str:
+    return (
+        "🚴 Бот на месте.\n"
+        "Можно добавить поездку сообщением: 25 90\n"
+        "Или открыть нужный раздел кнопками ниже."
+    )
+
+
+def praise_text(km: float) -> str:
+    if km >= 60:
+        return "Вот это уже серьёзный выезд. Хорошая работа."
+    if km >= 30:
+        return "Хорошая тренировка. Нормально покрутил."
+    if km >= 10:
+        return "Неплохой заезд. Вел точно не скучал."
+    return "Даже короткий выезд — всё равно движение вперёд."
+
+
+def maintenance_warning_text(user_id: int) -> str | None:
+    row = get_maintenance(user_id)
+    if row is None:
+        return None
+
+    left = DEFAULT_LUBE_INTERVAL_KM - (total_km(user_id) - float(row["last_lube"]))
+    if left < 100:
+        if left <= 0:
+            return f"⚠️ Смазку уже пора делать. Перекатал на {-left:.1f} км."
+        return f"⚠️ До смазки цепи осталось меньше 100 км: примерно {left:.1f} км."
+    return None
+
+
+def added_ride_text(user_id: int, km: float, minutes: int) -> str:
+    lines = [
+        f"Добавил заезд: {km:.1f} км.",
+        praise_text(km),
+        f"Время: {format_time(minutes)}.",
+        f"Средняя скорость: {avg_speed(km, minutes):.1f} км/ч.",
+        f"Ты уже проехал {total_km(user_id):.1f} км, ВАУ!",
+    ]
+    warning = maintenance_warning_text(user_id)
+    if warning:
+        lines.append(warning)
+    return "\n".join(lines)
+
+
+def summary_text(user_id: int) -> str:
+    rides = all_rides(user_id)
+    if not rides:
+        return (
+            "📊 Краткая сводка\n"
+            "Пока нет данных.\n"
+            "Добавь первый заезд, и бот начнёт вести историю."
+        )
+
+    avg = sum(avg_speed(float(r["km"]), int(r["min"])) for r in rides) / len(rides)
+
+    row = get_maintenance(user_id)
+    total = total_km(user_id)
+
+    lube_left = DEFAULT_LUBE_INTERVAL_KM - (total - float(row["last_lube"]))
+    chain_left = DEFAULT_CHAIN_REPLACE_INTERVAL_KM - (total - float(row["last_chain"]))
+
+    if lube_left <= 0:
+        lube_text = f"смазка нужна сейчас, перекатал на {-lube_left:.1f} км"
+    else:
+        lube_text = f"смазка примерно через {lube_left:.1f} км"
+
+    if chain_left <= 0:
+        chain_text = f"цепь пора менять, перекатал на {-chain_left:.1f} км"
+    else:
+        chain_text = f"замена цепи примерно через {chain_left:.1f} км"
+
+    return (
+        f"📊 Краткая сводка\n"
+        f"Количество заездов: {rides_count(user_id)}\n"
+        f"Общий километраж: {total:.1f} км\n"
+        f"Общее время в пути: {format_time(total_time(user_id))}\n"
+        f"Средняя скорость: {avg:.1f} км/ч\n"
+        f"Состояние трансмиссии: {lube_text}; {chain_text}."
+    )
+
+
+def transmission_text(user_id: int) -> str:
+    row = get_maintenance(user_id)
+    total = total_km(user_id)
+
+    lube_left = DEFAULT_LUBE_INTERVAL_KM - (total - float(row["last_lube"]))
+    chain_left = DEFAULT_CHAIN_REPLACE_INTERVAL_KM - (total - float(row["last_chain"]))
+
+    if lube_left <= 0:
+        lube_status = f"Смазка: пора, перекатал на {-lube_left:.1f} км"
+    else:
+        lube_status = f"Смазка: примерно через {lube_left:.1f} км"
+
+    if chain_left <= 0:
+        chain_status = f"Замена цепи: пора, перекатал на {-chain_left:.1f} км"
+    else:
+        chain_status = f"Замена цепи: примерно через {chain_left:.1f} км"
+
+    return (
+        "⚙️ Трансмиссия\n"
+        f"Общий пробег: {total:.1f} км\n"
+        f"Последняя смазка: на {float(row['last_lube']):.1f} км\n"
+        f"Последняя замена цепи: на {float(row['last_chain']):.1f} км\n\n"
+        f"{lube_status}\n"
+        f"{chain_status}"
+    )
+
+
+def rides_text(user_id: int, offset: int) -> str:
+    rows = rides_page(user_id, offset)
+    total = rides_count(user_id)
+
+    if not rows:
+        return "📚 Статистика\nПока нет заездов."
+
+    start_idx = offset + 1
+    end_idx = offset + len(rows)
+
+    lines = [f"📚 Статистика\nПоказаны заезды {start_idx}-{end_idx} из {total}"]
+
+    for r in rows:
+        lines.append(
+            f"\n{r['date']} | {float(r['km']):.1f} км | {format_time(int(r['min']))} | "
+            f"{avg_speed(float(r['km']), int(r['min'])):.1f} км/ч"
+        )
+
+    return "\n".join(lines)
+
+
+def reset_warning_text() -> str:
+    return (
+        "🧨 Ты правда хочешь всё удалить?\n"
+        "Все заезды, километры и история исчезнут без возможности восстановления."
+    )
+
 
 # ---------- UI ----------
 
-def main_kb():
+def main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить", callback_data="help")],
         [InlineKeyboardButton("📊 Краткая сводка", callback_data="summary")],
@@ -102,180 +360,178 @@ def main_kb():
     ])
 
 
-def rides_kb(offset, total):
-    btns = []
-    if offset > 0:
-        btns.append(InlineKeyboardButton("⬅️", callback_data=f"rides:{offset-5}"))
-    if offset+5 < total:
-        btns.append(InlineKeyboardButton("➡️", callback_data=f"rides:{offset+5}"))
+def rides_kb(offset: int, total: int) -> InlineKeyboardMarkup:
+    rows = []
 
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"rides:{max(offset - RIDES_PAGE_SIZE, 0)}"))
+    if offset + RIDES_PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"rides:{offset + RIDES_PAGE_SIZE}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("💾 Бэкап", callback_data="backup")])
+    rows.append([InlineKeyboardButton("🧨 Сбросить ВСЮ статистику", callback_data="reset")])
+    rows.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu")])
+
+    return InlineKeyboardMarkup(rows)
+
+
+def reset_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        btns,
-        [InlineKeyboardButton("💾 Бэкап", callback_data="backup")],
-        [InlineKeyboardButton("🧨 Сброс", callback_data="reset")],
-        [InlineKeyboardButton("⬅️ В меню", callback_data="menu")]
+        [InlineKeyboardButton("🔴 Да, удалить всё", callback_data="reset_yes")],
+        [InlineKeyboardButton("⚪ Отмена", callback_data="rides:0")],
     ])
 
-# ---------- TEXT ----------
-
-def summary_text(user):
-    rides = all_rides(user)
-    if not rides:
-        return "Пока нет данных"
-
-    avg = sum(avg_speed(r["km"], r["min"]) for r in rides) / len(rides)
-
-    return (
-        f"📊 Краткая сводка\n"
-        f"Заездов: {len(rides)}\n"
-        f"Км: {total_km(user):.1f}\n"
-        f"Время: {format_time(total_time(user))}\n"
-        f"Средняя скорость: {avg:.1f} км/ч"
-    )
 
 # ---------- HANDLERS ----------
-
-def user_exists(user_id):
-    c = db()
-    row = c.execute("SELECT 1 FROM maintenance WHERE user_id=?", (user_id,)).fetchone()
-    c.close()
-    return row is not None
-
-
-def ensure_user(user_id):
-    c = db()
-    cur = c.cursor()
-    cur.execute(
-        "INSERT OR IGNORE INTO maintenance (user_id, last_lube, last_chain) VALUES (?, 0, 0)",
-        (user_id,)
-    )
-    created = cur.rowcount > 0
-    c.commit()
-    c.close()
-    return created
-
-
-def first_start_text():
-    return (
-        "🚴 Привет. Это веложурнал-одометр.
-
-"
-        "Он нужен, чтобы вручную записывать поездки без GPS, считать общий пробег и держать обслуживание велосипеда под контролем.
-
-"
-        "Что умеет бот:
-"
-        "• добавлять заезды вручную
-"
-        "• считать общий километраж и общее время
-"
-        "• показывать краткую сводку
-"
-        "• хранить историю поездок
-"
-        "• делать бэкап
-
-"
-        "Как быстро добавить поездку:
-"
-        "25 90
-
-"
-        "Где 25 — километры, 90 — минуты."
-    )
-
-
-def regular_start_text():
-    return (
-        "🚴 Бот на месте.
-"
-        "Можно добавить поездку сообщением: 25 90
-"
-        "Или открыть нужный раздел кнопками ниже."
-    )
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     created = ensure_user(update.effective_user.id)
     await update.message.reply_text(
         first_start_text() if created else regular_start_text(),
-        reply_markup=main_kb()
+        reply_markup=main_kb(),
     )
 
 
 async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t = update.message.text.split()
-    try:
-        km = float(t[0])
-        m = int(t[1])
-    except:
+    text = update.message.text.strip()
+    if text.startswith("/"):
         return
 
-    user = update.effective_user.id
-    add(user, datetime.now().strftime("%Y-%m-%d"), km, m)
+    parts = text.split()
 
-    speed = avg_speed(km, m)
-    total = total_km(user)
+    try:
+        if len(parts) >= 2 and not looks_like_date(parts[0]):
+            ride_date = today_str()
+            km = parse_float(parts[0])
+            minutes = parse_int(parts[1])
+            note = " ".join(parts[2:]) if len(parts) > 2 else ""
+        elif len(parts) >= 3 and looks_like_date(parts[0]):
+            ride_date = parts[0]
+            km = parse_float(parts[1])
+            minutes = parse_int(parts[2])
+            note = " ".join(parts[3:]) if len(parts) > 3 else ""
+        else:
+            return
+    except Exception:
+        return
+
+    user_id = update.effective_user.id
+    ensure_user(user_id)
+    add_ride(user_id, ride_date, km, minutes, note)
 
     await update.message.reply_text(
-        f"Добавил {km} км\n"
-        f"Средняя: {speed:.1f} км/ч\n"
-        f"Ты уже проехал {total:.1f} км, ВАУ!",
-        reply_markup=main_kb()
+        added_ride_text(user_id, km, minutes),
+        reply_markup=main_kb(),
     )
 
 
-async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    user = update.effective_user.id
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    if q.data == "menu":
-        await q.message.reply_text("Меню", reply_markup=main_kb())
+    user_id = update.effective_user.id
+    ensure_user(user_id)
 
-    elif q.data == "summary":
-        await q.message.reply_text(summary_text(user), reply_markup=main_kb())
+    if query.data == "menu":
+        await query.message.reply_text(
+            regular_start_text(),
+            reply_markup=main_kb(),
+        )
+        return
 
-    elif q.data.startswith("rides"):
-        offset = int(q.data.split(":")[1])
-        rides = all_rides(user)[offset:offset+5]
+    if query.data == "help":
+        await query.message.reply_text(
+            "Чтобы добавить поездку, просто пришли сообщение:\n"
+            "25 90\n\n"
+            "Или с датой:\n"
+            "2026-04-08 25 90 вечерний",
+            reply_markup=main_kb(),
+        )
+        return
 
-        text = "📚 Статистика\n"
-        for r in rides:
-            text += f"\n{r['date']} | {r['km']} км | {format_time(r['min'])}"
+    if query.data == "summary":
+        await query.message.reply_text(
+            summary_text(user_id),
+            reply_markup=main_kb(),
+        )
+        return
 
-        await q.message.reply_text(text, reply_markup=rides_kb(offset, count(user)))
+    if query.data == "trans":
+        await query.message.reply_text(
+            transmission_text(user_id),
+            reply_markup=main_kb(),
+        )
+        return
 
-    elif q.data == "backup":
-        data = [dict(r) for r in all_rides(user)]
-        with open("backup.json","w") as f:
-            json.dump(data,f)
-        await q.message.reply_document(open("backup.json","rb"))
+    if query.data.startswith("rides:"):
+        offset = int(query.data.split(":")[1])
+        await query.message.reply_text(
+            rides_text(user_id, offset),
+            reply_markup=rides_kb(offset, rides_count(user_id)),
+        )
+        return
 
-    elif q.data == "reset":
-        await q.message.reply_text("Ты уверен?", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Да", callback_data="reset_yes")],
-            [InlineKeyboardButton("Нет", callback_data="menu")]
-        ]))
+    if query.data == "backup":
+        rides = [dict(r) for r in all_rides(user_id)]
+        payload = {
+            "user_id": user_id,
+            "exported_at": datetime.utcnow().isoformat() + "Z",
+            "summary": {
+                "rides_count": rides_count(user_id),
+                "total_km": total_km(user_id),
+                "total_time_min": total_time(user_id),
+            },
+            "maintenance": dict(get_maintenance(user_id)),
+            "rides": rides,
+        }
 
-    elif q.data == "reset_yes":
-        db().execute("DELETE FROM rides WHERE user_id=?",(user,))
-        db().commit()
-        await q.message.reply_text("Очищено", reply_markup=main_kb())
+        filename = "backup.json"
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        with open(filename, "rb") as f:
+            await query.message.reply_document(f)
+
+        os.remove(filename)
+        return
+
+    if query.data == "reset":
+        await query.message.reply_text(
+            reset_warning_text(),
+            reply_markup=reset_kb(),
+        )
+        return
+
+    if query.data == "reset_yes":
+        reset_user_data(user_id)
+        await query.message.reply_text(
+            "Всё очищено. Начинаем с чистого листа.",
+            reply_markup=main_kb(),
+        )
+        return
+
 
 # ---------- MAIN ----------
 
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("Укажи переменную окружения TELEGRAM_BOT_TOKEN")
+
     init()
 
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(cb))
+    app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, quick))
 
+    print("Bot running...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
