@@ -135,9 +135,70 @@ def summary_text(user):
 
 # ---------- HANDLERS ----------
 
+def user_exists(user_id):
+    c = db()
+    row = c.execute("SELECT 1 FROM maintenance WHERE user_id=?", (user_id,)).fetchone()
+    c.close()
+    return row is not None
+
+
+def ensure_user(user_id):
+    c = db()
+    cur = c.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO maintenance (user_id, last_lube, last_chain) VALUES (?, 0, 0)",
+        (user_id,)
+    )
+    created = cur.rowcount > 0
+    c.commit()
+    c.close()
+    return created
+
+
+def first_start_text():
+    return (
+        "🚴 Привет. Это веложурнал-одометр.
+
+"
+        "Он нужен, чтобы вручную записывать поездки без GPS, считать общий пробег и держать обслуживание велосипеда под контролем.
+
+"
+        "Что умеет бот:
+"
+        "• добавлять заезды вручную
+"
+        "• считать общий километраж и общее время
+"
+        "• показывать краткую сводку
+"
+        "• хранить историю поездок
+"
+        "• делать бэкап
+
+"
+        "Как быстро добавить поездку:
+"
+        "25 90
+
+"
+        "Где 25 — километры, 90 — минуты."
+    )
+
+
+def regular_start_text():
+    return (
+        "🚴 Бот на месте.
+"
+        "Можно добавить поездку сообщением: 25 90
+"
+        "Или открыть нужный раздел кнопками ниже."
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    created = ensure_user(update.effective_user.id)
     await update.message.reply_text(
-        "🚴 Веложурнал\nПиши: 25 90",
+        first_start_text() if created else regular_start_text(),
         reply_markup=main_kb()
     )
 
