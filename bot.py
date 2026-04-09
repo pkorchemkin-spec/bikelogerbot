@@ -462,30 +462,14 @@ def summary_text(user_id: int) -> str:
         )
 
     avg = sum(avg_speed(float(r["km"]), int(r["min"])) for r in rides) / len(rides)
-
-    row = get_maintenance(user_id)
     total = total_km(user_id)
-
-    lube_left = DEFAULT_LUBE_INTERVAL_KM - (total - float(row["last_lube"]))
-    chain_left = DEFAULT_CHAIN_REPLACE_INTERVAL_KM - (total - float(row["last_chain"]))
-
-    if lube_left <= 0:
-        lube_text = f"смазка нужна сейчас, перекатал на {-lube_left:.1f} км"
-    else:
-        lube_text = f"смазка примерно через {lube_left:.1f} км"
-
-    if chain_left <= 0:
-        chain_text = f"цепь пора менять, перекатал на {-chain_left:.1f} км"
-    else:
-        chain_text = f"замена цепи примерно через {chain_left:.1f} км"
 
     return (
         f"📊 Краткая сводка\n"
         f"Количество заездов: {rides_count(user_id)}\n"
         f"Общий километраж: {total:.1f} км\n"
         f"Общее время в пути: {format_time(total_time(user_id))}\n"
-        f"Средняя скорость: {avg:.1f} км/ч\n"
-        f"Состояние трансмиссии: {lube_text}; {chain_text}."
+        f"Средняя скорость: {avg:.1f} км/ч"
     )
 
 
@@ -596,6 +580,12 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⚙️ Трансмиссия", callback_data="trans")],
     ])
 
+def summary_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 Полная статистика", callback_data="rides:0")],
+        [InlineKeyboardButton("⚙️ Состояние трансмиссии", callback_data="trans")],
+        [InlineKeyboardButton("⬅️ В меню", callback_data="menu")],
+    ])
 
 def rides_kb(offset: int, total: int) -> InlineKeyboardMarkup:
     rows = []
@@ -1005,7 +995,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cancel_input_states(context)
         await query.message.reply_text(
             summary_text(user_id),
-            reply_markup=main_kb(),
+            reply_markup=summary_kb(),
         )
         return
 
