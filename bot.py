@@ -749,9 +749,14 @@ def edit_note_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
 
 def service_kb(offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💾 Бэкап", callback_data="backup")],
-        [InlineKeyboardButton("🧨 Сброс", callback_data=f"reset:{offset}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data=f"rides:{offset}")],
+        [
+            InlineKeyboardButton("💾 Бэкап", callback_data="backup"),
+            InlineKeyboardButton("🧨 Сброс", callback_data=f"reset:{offset}"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"rides:{offset}"),
+            InlineKeyboardButton("🏠 В меню", callback_data="menu"),
+        ],
     ])
 
 
