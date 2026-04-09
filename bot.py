@@ -697,7 +697,7 @@ def rides_kb(offset: int, total: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("➡️", callback_data=next_callback),
     ])
 
-    rows.append([InlineKeyboardButton("✏️ Исправить", callback_data=f"edit_menu:{offset}")])
+    rows.append([InlineKeyboardButton("✏️ Изменить данные заездов", callback_data=f"edit_menu:{offset}")])
     rows.append([InlineKeyboardButton("⚙️ Сброс / Бэкап", callback_data=f"service_menu:{offset}")])
     rows.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu")])
 
@@ -727,12 +727,19 @@ def edit_select_kb(user_id: int, offset: int) -> InlineKeyboardMarkup:
 
 def edit_action_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 Дату заезда", callback_data=f"edit_field:{ride_id}:{offset}:date")],
-        [InlineKeyboardButton("📏 Количество километров", callback_data=f"edit_field:{ride_id}:{offset}:km")],
-        [InlineKeyboardButton("⏱ Время в пути", callback_data=f"edit_field:{ride_id}:{offset}:time")],
-        [InlineKeyboardButton("📝 Краткое описание", callback_data=f"edit_field:{ride_id}:{offset}:note")],
+        [
+            InlineKeyboardButton("📅 Дата", callback_data=f"edit_field:{ride_id}:{offset}:date"),
+            InlineKeyboardButton("📏 Дистанция", callback_data=f"edit_field:{ride_id}:{offset}:km"),
+        ],
+        [
+            InlineKeyboardButton("⏱ Время", callback_data=f"edit_field:{ride_id}:{offset}:time"),
+            InlineKeyboardButton("📝 Описание", callback_data=f"edit_field:{ride_id}:{offset}:note"),
+        ],
         [InlineKeyboardButton("🗑 Удалить заезд", callback_data=f"delete_confirm:{ride_id}:{offset}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data=f"edit_menu:{offset}")],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"edit_menu:{offset}"),
+            InlineKeyboardButton("🏠 В меню", callback_data="menu"),
+        ],
     ])
 
 
