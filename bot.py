@@ -346,15 +346,29 @@ def save_edited_ride_field(
 
 # ---------- STATE ----------
 
+def clear_flow_prompt_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("flow_prompt_message_id", None)
+
+
+def clear_summary_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("summary_message_id", None)
+
+
+def clear_rides_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("rides_message_id", None)
+
+
 def clear_edit_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_edit_ride_id", None)
     context.user_data.pop("pending_edit_offset", None)
     context.user_data.pop("pending_edit_field", None)
+    clear_flow_prompt_state(context)
 
 
 def clear_add_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_add_step", None)
     context.user_data.pop("pending_add_data", None)
+    clear_flow_prompt_state(context)
 
 
 def clear_import_state(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -856,6 +870,36 @@ def add_kb_note() -> InlineKeyboardMarkup:
 
 
 
+async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int | None) -> None:
+    if not message_id:
+        return
+
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+    if context.user_data.get("last_menu_chat_id") == chat_id and context.user_data.get("last_menu_message_id") == message_id:
+        context.user_data.pop("last_menu_chat_id", None)
+        context.user_data.pop("last_menu_message_id", None)
+
+    if context.user_data.get("summary_message_id") == message_id:
+        context.user_data.pop("summary_message_id", None)
+
+    if context.user_data.get("rides_message_id") == message_id:
+        context.user_data.pop("rides_message_id", None)
+
+    if context.user_data.get("flow_prompt_message_id") == message_id:
+        context.user_data.pop("flow_prompt_message_id", None)
+
+
+async def delete_query_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    await safe_delete_message(context, update.effective_chat.id, query.message.message_id)
+
+
 async def clear_last_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     last_chat_id = context.user_data.get("last_menu_chat_id")
     last_message_id = context.user_data.get("last_menu_message_id")
@@ -871,6 +915,15 @@ async def clear_last_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
         )
     except Exception:
         pass
+
+
+async def delete_flow_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    await safe_delete_message(context, chat_id, context.user_data.get("flow_prompt_message_id"))
+
+
+async def delete_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await safe_delete_message(context, update.effective_chat.id, update.message.message_id)
 
 
 async def send_bot_message(
@@ -894,6 +947,41 @@ async def send_bot_message(
         context.user_data.pop("last_menu_chat_id", None)
         context.user_data.pop("last_menu_message_id", None)
 
+    return message
+
+
+async def send_flow_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    reply_markup=None,
+):
+    message = await send_bot_message(context, chat_id, text, reply_markup=reply_markup)
+    context.user_data["flow_prompt_message_id"] = message.message_id
+    return message
+
+
+async def send_summary_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    reply_markup=None,
+):
+    message = await send_bot_message(context, chat_id, text, reply_markup=reply_markup)
+    context.user_data["summary_message_id"] = message.message_id
+    clear_rides_state(context)
+    return message
+
+
+async def send_rides_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    reply_markup=None,
+):
+    message = await send_bot_message(context, chat_id, text, reply_markup=reply_markup)
+    context.user_data["rides_message_id"] = message.message_id
+    clear_summary_state(context)
     return message
 
 
@@ -1008,14 +1096,12 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         updated_ride = get_ride(user_id, pending_edit_id)
         ride_number = get_ride_number_by_id(user_id, pending_edit_id) or 0
+        await delete_flow_prompt(context, update.effective_chat.id)
+        await delete_user_input(update, context)
         clear_edit_state(context)
 
         await send_bot_message(context, update.effective_chat.id, 
-            "Готово, обновил.",
-            reply_markup=edit_action_kb(pending_edit_id, pending_edit_offset),
-        )
-        await send_bot_message(context, update.effective_chat.id, 
-            edit_action_text(updated_ride, ride_number),
+            edit_done_text(updated_ride, ride_number),
             reply_markup=edit_action_kb(pending_edit_id, pending_edit_offset),
         )
         return
@@ -1023,7 +1109,9 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------- THOUGHTFUL ADD MODE ----------
     if pending_add_step == "date":
         if not looks_like_date(text):
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_flow_prompt(context, update.effective_chat.id)
+            await delete_user_input(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 "Нужна дата в формате:\nYYYY-MM-DD",
                 reply_markup=add_kb_first(),
             )
@@ -1033,7 +1121,9 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_add_data"] = pending_add_data
         context.user_data["pending_add_step"] = "km"
 
-        await send_bot_message(context, update.effective_chat.id, 
+        await delete_flow_prompt(context, update.effective_chat.id)
+        await delete_user_input(update, context)
+        await send_flow_message(context, update.effective_chat.id, 
             add_ask_km_text(),
             reply_markup=add_kb_next(),
         )
@@ -1043,7 +1133,9 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             km = parse_float(text)
         except Exception:
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_flow_prompt(context, update.effective_chat.id)
+            await delete_user_input(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 "Не понял дистанцию.\nПопробуй ещё раз:\n25 или 25.5",
                 reply_markup=add_kb_next(),
             )
@@ -1053,7 +1145,9 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_add_data"] = pending_add_data
         context.user_data["pending_add_step"] = "time"
 
-        await send_bot_message(context, update.effective_chat.id, 
+        await delete_flow_prompt(context, update.effective_chat.id)
+        await delete_user_input(update, context)
+        await send_flow_message(context, update.effective_chat.id, 
             add_km_reaction(km) + "\n\n" + add_ask_time_text(km),
             reply_markup=add_kb_next(),
         )
@@ -1063,7 +1157,9 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             minutes = parse_duration(text)
         except Exception:
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_flow_prompt(context, update.effective_chat.id)
+            await delete_user_input(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 "Не понял время.\nПопробуй:\n90 или 1:30",
                 reply_markup=add_kb_next(),
             )
@@ -1073,7 +1169,9 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_add_data"] = pending_add_data
         context.user_data["pending_add_step"] = "note"
 
-        await send_bot_message(context, update.effective_chat.id, 
+        await delete_flow_prompt(context, update.effective_chat.id)
+        await delete_user_input(update, context)
+        await send_flow_message(context, update.effective_chat.id, 
             add_ask_note_text(minutes),
             reply_markup=add_kb_note(),
         )
@@ -1087,6 +1185,8 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         minutes = pending_add_data["minutes"]
 
         add_ride(user_id, ride_date, km, minutes, note)
+        await delete_flow_prompt(context, update.effective_chat.id)
+        await delete_user_input(update, context)
         clear_add_state(context)
 
         await send_bot_message(context, update.effective_chat.id, 
@@ -1149,7 +1249,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_add_step"] = "date"
         context.user_data["pending_add_data"] = {}
 
-        await send_bot_message(context, update.effective_chat.id, 
+        await send_flow_message(context, update.effective_chat.id, 
             add_intro_text(),
             reply_markup=add_kb_first(),
         )
@@ -1159,7 +1259,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_add_data"]["date"] = today_str()
         context.user_data["pending_add_step"] = "km"
 
-        await send_bot_message(context, update.effective_chat.id, 
+        await delete_query_message(update, context)
+        await send_flow_message(context, update.effective_chat.id, 
             add_ask_km_text(),
             reply_markup=add_kb_next(),
         )
@@ -1169,7 +1270,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_add_data"]["date"] = yesterday_str()
         context.user_data["pending_add_step"] = "km"
 
-        await send_bot_message(context, update.effective_chat.id, 
+        await delete_query_message(update, context)
+        await send_flow_message(context, update.effective_chat.id, 
             add_ask_km_text(),
             reply_markup=add_kb_next(),
         )
@@ -1183,8 +1285,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         minutes = pending_add_data["minutes"]
 
         add_ride(user_id, ride_date, km, minutes, "")
+        await delete_query_message(update, context)
+        await delete_flow_prompt(context, update.effective_chat.id)
         clear_add_state(context)
-
         await send_bot_message(context, update.effective_chat.id, 
             add_done_text(user_id, ride_date, km, minutes, ""),
             reply_markup=main_kb(),
@@ -1204,7 +1307,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if step == "km":
             context.user_data["pending_add_step"] = "date"
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_query_message(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 add_intro_text(),
                 reply_markup=add_kb_first(),
             )
@@ -1212,7 +1316,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if step == "time":
             context.user_data["pending_add_step"] = "km"
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_query_message(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 add_ask_km_text(),
                 reply_markup=add_kb_next(),
             )
@@ -1223,7 +1328,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             km = context.user_data.get("pending_add_data", {}).get("km")
             if km is None:
                 context.user_data["pending_add_step"] = "date"
-                await send_bot_message(context, update.effective_chat.id, 
+                await delete_query_message(update, context)
+                await send_flow_message(context, update.effective_chat.id, 
                     add_intro_text(),
                     reply_markup=add_kb_first(),
                 )
@@ -1255,7 +1361,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "summary":
         cancel_input_states(context)
-        await send_bot_message(context, update.effective_chat.id, 
+        await send_summary_message(context, update.effective_chat.id, 
             summary_text(user_id),
             reply_markup=summary_kb(),
         )
@@ -1272,7 +1378,11 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("rides:"):
         cancel_input_states(context)
         offset = int(query.data.split(":")[1])
-        await send_bot_message(context, update.effective_chat.id, 
+        if query.message and context.user_data.get("summary_message_id") == query.message.message_id:
+            await delete_query_message(update, context)
+        elif query.message and context.user_data.get("rides_message_id") == query.message.message_id:
+            await delete_query_message(update, context)
+        await send_rides_message(context, update.effective_chat.id, 
             rides_text(user_id, offset),
             reply_markup=rides_kb(offset, rides_count(user_id)),
         )
@@ -1281,6 +1391,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("edit_menu:"):
         cancel_input_states(context)
         offset = int(query.data.split(":")[1])
+        if query.message and context.user_data.get("rides_message_id") == query.message.message_id:
+            await delete_query_message(update, context)
         await send_bot_message(context, update.effective_chat.id, 
             edit_intro_text(user_id, offset),
             reply_markup=edit_select_kb(user_id, offset),
@@ -1324,6 +1436,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ride_number = get_ride_number_by_id(user_id, ride_id) or 0
         clear_edit_state(context)
 
+        await delete_query_message(update, context)
         await send_bot_message(context, update.effective_chat.id, 
             edit_action_text(ride, ride_number),
             reply_markup=edit_action_kb(ride_id, offset),
@@ -1349,28 +1462,32 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["pending_edit_field"] = field
 
         if field == "date":
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_query_message(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 edit_date_prompt_text(ride),
                 reply_markup=edit_date_kb(ride_id, offset),
             )
             return
 
         if field == "km":
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_query_message(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 edit_km_prompt_text(ride),
                 reply_markup=edit_field_back_kb(ride_id, offset),
             )
             return
 
         if field == "time":
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_query_message(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 edit_time_prompt_text(ride),
                 reply_markup=edit_field_back_kb(ride_id, offset),
             )
             return
 
         if field == "note":
-            await send_bot_message(context, update.effective_chat.id, 
+            await delete_query_message(update, context)
+            await send_flow_message(context, update.effective_chat.id, 
                 edit_note_prompt_text(ride),
                 reply_markup=edit_note_kb(ride_id, offset),
             )
@@ -1400,12 +1517,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        await delete_query_message(update, context)
+        await delete_flow_prompt(context, update.effective_chat.id)
         await send_bot_message(context, update.effective_chat.id, 
-            "Готово, обновил дату.",
-            reply_markup=edit_action_kb(ride_id, offset),
-        )
-        await send_bot_message(context, update.effective_chat.id, 
-            edit_action_text(updated_ride, ride_number),
+            edit_done_text(updated_ride, ride_number, "Готово, обновил дату."),
             reply_markup=edit_action_kb(ride_id, offset),
         )
         return
@@ -1427,12 +1542,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        await delete_query_message(update, context)
+        await delete_flow_prompt(context, update.effective_chat.id)
         await send_bot_message(context, update.effective_chat.id, 
-            "Готово, обновил дату.",
-            reply_markup=edit_action_kb(ride_id, offset),
-        )
-        await send_bot_message(context, update.effective_chat.id, 
-            edit_action_text(updated_ride, ride_number),
+            edit_done_text(updated_ride, ride_number, "Готово, обновил дату."),
             reply_markup=edit_action_kb(ride_id, offset),
         )
         return
@@ -1454,12 +1567,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        await delete_query_message(update, context)
+        await delete_flow_prompt(context, update.effective_chat.id)
         await send_bot_message(context, update.effective_chat.id, 
-            "Описание удалил.",
-            reply_markup=edit_action_kb(ride_id, offset),
-        )
-        await send_bot_message(context, update.effective_chat.id, 
-            edit_action_text(updated_ride, ride_number),
+            edit_done_text(updated_ride, ride_number, "Описание удалил."),
             reply_markup=edit_action_kb(ride_id, offset),
         )
         return
@@ -1495,13 +1606,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if offset >= total and offset > 0:
             offset = max(0, offset - RIDES_PAGE_SIZE)
 
-        await send_bot_message(context, update.effective_chat.id, 
-            "Заезд удалил.",
-            reply_markup=rides_kb(offset, rides_count(user_id)),
-        )
-        await send_bot_message(context, update.effective_chat.id, 
-            rides_text(user_id, offset),
-            reply_markup=rides_kb(offset, rides_count(user_id)),
+        await delete_query_message(update, context)
+        await send_rides_message(context, update.effective_chat.id, 
+            "Заезд удалил.\n\n" + rides_text(user_id, offset),
         )
         return
 
