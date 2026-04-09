@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -41,6 +41,10 @@ def avg_speed(km: float, minutes: int) -> float:
 
 def today_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def yesterday_str() -> str:
+    return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def parse_float(value: str) -> float:
@@ -347,16 +351,17 @@ def add_intro_text() -> str:
     return (
         "➕ Добавление заезда\n\n"
         "Давай спокойно запишем поездку по шагам.\n\n"
-        "С какого числа был заезд?\n"
+        "Какого числа был заезд?\n"
         "Напиши дату в формате:\n"
-        "YYYY-MM-DD"
+        "YYYY-MM-DD\n"
+        f"Например, {today_str()}"
     )
 
 
 def add_ask_km_text() -> str:
     return (
         "Отлично, дату запомнил.\n\n"
-        "Сколько проехал?\n"
+        "Сколько километров проехал?\n"
         "Можно просто числом:\n"
         "25 или 25.5"
     )
@@ -376,8 +381,7 @@ def add_ask_note_text(minutes: int) -> str:
         f"Окей, время: {format_time(minutes)}.\n\n"
         "Хочешь добавить короткую заметку?\n"
         "Например: вечерний заезд\n\n"
-        "Если не нужно — отправь:\n"
-        "-"
+        "Если не нужно — отправь «-» или нажми кнопку ниже."
     )
 
 
@@ -666,12 +670,24 @@ def reset_kb(offset: int) -> InlineKeyboardMarkup:
 
 def add_kb_first() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ В меню", callback_data="add_cancel")]
+        [
+            InlineKeyboardButton("Сегодня", callback_data="add_date_today"),
+            InlineKeyboardButton("Вчера", callback_data="add_date_yesterday"),
+        ],
+        [InlineKeyboardButton("⬅️ В меню", callback_data="add_cancel")],
     ])
 
 
 def add_kb_next() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Назад", callback_data="add_back")],
+        [InlineKeyboardButton("⬅️ В меню", callback_data="add_cancel")],
+    ])
+
+
+def add_kb_note() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭ Пропустить", callback_data="add_skip_note")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="add_back")],
         [InlineKeyboardButton("⬅️ В меню", callback_data="add_cancel")],
     ])
@@ -806,7 +822,7 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             add_ask_note_text(minutes),
-            reply_markup=add_kb_next(),
+            reply_markup=add_kb_note(),
         )
         return
 
@@ -884,6 +900,42 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             add_intro_text(),
             reply_markup=add_kb_first(),
+        )
+        return
+
+    if query.data == "add_date_today":
+        context.user_data["pending_add_data"]["date"] = today_str()
+        context.user_data["pending_add_step"] = "km"
+
+        await query.message.reply_text(
+            add_ask_km_text(),
+            reply_markup=add_kb_next(),
+        )
+        return
+
+    if query.data == "add_date_yesterday":
+        context.user_data["pending_add_data"]["date"] = yesterday_str()
+        context.user_data["pending_add_step"] = "km"
+
+        await query.message.reply_text(
+            add_ask_km_text(),
+            reply_markup=add_kb_next(),
+        )
+        return
+
+    if query.data == "add_skip_note":
+        pending_add_data = context.user_data.get("pending_add_data", {})
+
+        ride_date = pending_add_data["date"]
+        km = pending_add_data["km"]
+        minutes = pending_add_data["minutes"]
+
+        add_ride(user_id, ride_date, km, minutes, "")
+        clear_add_state(context)
+
+        await query.message.reply_text(
+            add_done_text(user_id, ride_date, km, minutes, ""),
+            reply_markup=main_kb(),
         )
         return
 
