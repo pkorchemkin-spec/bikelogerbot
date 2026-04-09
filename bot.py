@@ -159,6 +159,7 @@ def ensure_user(user_id: int) -> bool:
     conn.close()
     return created
 
+
 # ---------- DATA ----------
 
 def add_ride(user_id: int, ride_date: str, km: float, minutes: int, note: str = "") -> None:
@@ -301,6 +302,46 @@ def get_maintenance(user_id: int):
     row = cur.fetchone()
     conn.close()
     return row
+
+
+def get_ride_number_by_id(user_id: int, ride_id: int) -> int | None:
+    rows = all_rides(user_id)
+    total = len(rows)
+
+    for idx, ride in enumerate(rows):
+        if int(ride["id"]) == ride_id:
+            return total - idx
+
+    return None
+
+
+def save_edited_ride_field(
+    user_id: int,
+    ride_id: int,
+    field: str,
+    value,
+) -> bool:
+    ride = get_ride(user_id, ride_id)
+    if not ride:
+        return False
+
+    ride_date = ride["date"]
+    km = float(ride["km"])
+    minutes = int(ride["min"])
+    note = ride["note"] or ""
+
+    if field == "date":
+        ride_date = value
+    elif field == "km":
+        km = value
+    elif field == "time":
+        minutes = value
+    elif field == "note":
+        note = value
+    else:
+        return False
+
+    return update_ride(user_id, ride_id, ride_date, km, minutes, note)
 
 
 # ---------- STATE ----------
@@ -841,6 +882,7 @@ async def quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_add_data = context.user_data.get("pending_add_data", {})
 
     parts = text.split()
+
 
     # ---------- EDIT MODE ----------
     if pending_edit_id:
@@ -1411,7 +1453,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-        if query.data == "backup":
+    if query.data == "backup":
         cancel_input_states(context)
 
         rides = all_rides(user_id)
@@ -1468,28 +1510,27 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(filename)
         return
 
-if query.data == "import_start":
-    cancel_input_states(context)
+    if query.data == "import_start":
+        cancel_input_states(context)
 
-    await query.message.reply_text(
-        "⚠️ Внимание!\n\n"
-        "Все данные из бота будут стерты\n"
-        "и заменены на новые из таблички.\n\n"
-        "Продолжить?",
-        reply_markup=import_confirm_kb(0),
-    )
-    return
+        await query.message.reply_text(
+            "⚠️ Внимание!\n\n"
+            "Все данные из бота будут стерты\n"
+            "и заменены на новые из таблички.\n\n"
+            "Продолжить?",
+            reply_markup=import_confirm_kb(0),
+        )
+        return
 
+    if query.data == "import_confirm":
+        context.user_data["pending_import"] = True
 
-if query.data == "import_confirm":
-    context.user_data["pending_import"] = True
-
-    await query.message.reply_text(
-        "Пришли CSV-файл с заездами.\n\n"
-        "Лучше использовать файл,\n"
-        "который был сохранён через кнопку «Сохранить бэкап».",
-    )
-    return
+        await query.message.reply_text(
+            "Пришли CSV-файл с заездами.\n\n"
+            "Лучше использовать файл,\n"
+            "который был сохранён через кнопку «Сохранить бэкап».",
+        )
+        return
 
     if query.data.startswith("reset:"):
         cancel_input_states(context)
@@ -1508,6 +1549,7 @@ if query.data == "import_confirm":
             reply_markup=main_kb(),
         )
         return
+
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("pending_import"):
@@ -1597,9 +1639,9 @@ def main():
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(callback))
-app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, quick))
+    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, quick))
 
     print("Bot running...")
     app.run_polling()
