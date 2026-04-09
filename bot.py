@@ -1,5 +1,6 @@
 import os
 import json
+import csv
 from datetime import datetime, timedelta
 
 import psycopg
@@ -315,9 +316,14 @@ def clear_add_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_add_data", None)
 
 
+def clear_import_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("pending_import", None)
+
+
 def cancel_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_edit_state(context)
     clear_add_state(context)
+    clear_import_state(context)
 
 
 # ---------- TEXT ----------
@@ -750,13 +756,21 @@ def edit_note_kb(ride_id: int, offset: int) -> InlineKeyboardMarkup:
 def service_kb(offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💾 Бэкап", callback_data="backup"),
-            InlineKeyboardButton("🧨 Сброс", callback_data=f"reset:{offset}"),
+            InlineKeyboardButton("💾 Сохранить бэкап", callback_data="backup"),
+            InlineKeyboardButton("📥 Загрузить данные", callback_data="import_start"),
         ],
+        [InlineKeyboardButton("🧨 Сбросить данные", callback_data=f"reset:{offset}")],
         [
             InlineKeyboardButton("⬅️ Назад", callback_data=f"rides:{offset}"),
             InlineKeyboardButton("🏠 В меню", callback_data="menu"),
         ],
+    ])
+
+
+def import_confirm_kb(offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔴 Продолжить", callback_data="import_confirm")],
+        [InlineKeyboardButton("⚪ Отмена", callback_data=f"service_menu:{offset}")],
     ])
 
 
@@ -1397,30 +1411,85 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if query.data == "backup":
+        if query.data == "backup":
         cancel_input_states(context)
-        rides = [dict(r) for r in all_rides(user_id)]
-        payload = {
-            "user_id": user_id,
-            "exported_at": datetime.utcnow().isoformat() + "Z",
-            "summary": {
-                "rides_count": rides_count(user_id),
-                "total_km": total_km(user_id),
-                "total_time_min": total_time(user_id),
-            },
-            "maintenance": dict(get_maintenance(user_id)),
-            "rides": rides,
-        }
 
-        filename = "backup.json"
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        rides = all_rides(user_id)
+        total = rides_count(user_id)
+
+        filename = "rides_backup.csv"
+
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+
+            writer.writerow([
+                "Номер",
+                "Дата",
+                "Км",
+                "Время (мин)",
+                "Время",
+                "Средняя скорость (км/ч)",
+                "Описание"
+            ])
+
+            for idx, r in enumerate(rides):
+                number = total - idx
+                km = float(r["km"])
+                minutes = int(r["min"])
+
+                writer.writerow([
+                    number,
+                    r["date"],
+                    f"{km:.1f}",
+                    minutes,
+                    format_time(minutes),
+                    f"{avg_speed(km, minutes):.1f}",
+                    r["note"] or ""
+                ])
 
         with open(filename, "rb") as f:
             await query.message.reply_document(f)
 
+        await query.message.reply_text(
+            "Готово — это твой бэкап заездов в формате CSV.\n\n"
+            "Что внутри:\n"
+            "• все записанные заезды\n"
+            "• дата, дистанция, время и описание\n\n"
+            "Как открыть файл:\n"
+            "• Excel\n"
+            "• Google Таблицы\n"
+            "• Numbers\n"
+            "• другие табличные редакторы\n\n"
+            "Файл можно не только хранить, но и редактировать вручную.\n"
+            "Позже его можно будет загрузить обратно в бота через кнопку «Загрузить данные».",
+            reply_markup=service_kb(0),
+        )
+
         os.remove(filename)
         return
+
+if query.data == "import_start":
+    cancel_input_states(context)
+
+    await query.message.reply_text(
+        "⚠️ Внимание!\n\n"
+        "Все данные из бота будут стерты\n"
+        "и заменены на новые из таблички.\n\n"
+        "Продолжить?",
+        reply_markup=import_confirm_kb(0),
+    )
+    return
+
+
+if query.data == "import_confirm":
+    context.user_data["pending_import"] = True
+
+    await query.message.reply_text(
+        "Пришли CSV-файл с заездами.\n\n"
+        "Лучше использовать файл,\n"
+        "который был сохранён через кнопку «Сохранить бэкап».",
+    )
+    return
 
     if query.data.startswith("reset:"):
         cancel_input_states(context)
@@ -1440,6 +1509,81 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("pending_import"):
+        return
+
+    file = update.message.document
+
+    if not file or not file.file_name.lower().endswith(".csv"):
+        await update.message.reply_text("Нужен CSV-файл.")
+        return
+
+    file_obj = await file.get_file()
+    path = "import.csv"
+    await file_obj.download_to_drive(path)
+
+    user_id = update.effective_user.id
+
+    try:
+        rows_to_import = []
+
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+
+            required_fields = ["Дата", "Км", "Время (мин)"]
+            for field in required_fields:
+                if not reader.fieldnames or field not in reader.fieldnames:
+                    await update.message.reply_text(
+                        "Файл не подходит.\n"
+                        f"Не найдена колонка: {field}"
+                    )
+                    return
+
+            for i, row in enumerate(reader, start=1):
+                try:
+                    date = row.get("Дата")
+                    km = float(row.get("Км", 0))
+                    minutes = int(row.get("Время (мин)", 0))
+                    note = row.get("Описание", "")
+
+                    if not date:
+                        raise ValueError("пустая дата")
+
+                    if not looks_like_date(date):
+                        raise ValueError("неверный формат даты")
+
+                    rows_to_import.append((date, km, minutes, note))
+
+                except Exception:
+                    await update.message.reply_text(
+                        f"Ошибка в строке {i}.\n"
+                        "Проверь формат данных."
+                    )
+                    return
+
+        if not rows_to_import:
+            await update.message.reply_text("Файл пустой.")
+            return
+
+        reset_user_data(user_id)
+
+        for ride in rows_to_import:
+            add_ride(user_id, *ride)
+
+        await update.message.reply_text(
+            f"Данные успешно загружены.\n\nДобавлено заездов: {len(rows_to_import)}",
+            reply_markup=main_kb(),
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при загрузке: {e}")
+
+    finally:
+        context.user_data["pending_import"] = False
+        if os.path.exists(path):
+            os.remove(path)
+
 
 # ---------- MAIN ----------
 
@@ -1453,8 +1597,9 @@ def main():
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, quick))
+app.add_handler(CallbackQueryHandler(callback))
+app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, quick))
 
     print("Bot running...")
     app.run_polling()
