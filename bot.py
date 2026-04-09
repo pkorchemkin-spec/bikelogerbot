@@ -1,7 +1,9 @@
 import os
-import sqlite3
 import json
 from datetime import datetime, timedelta
+
+import psycopg
+from psycopg.rows import dict_row
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -13,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-DB_PATH = "bike_log.db"
+
 DEFAULT_LUBE_INTERVAL_KM = 250
 DEFAULT_CHAIN_REPLACE_INTERVAL_KM = 500
 RIDES_PAGE_SIZE = 5
@@ -106,9 +108,11 @@ def add_km_reaction(km: float) -> str:
 # ---------- DB ----------
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("Укажи переменную окружения DATABASE_URL")
+
+    return psycopg.connect(database_url, row_factory=dict_row)
 
 
 def init():
@@ -117,10 +121,10 @@ def init():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS rides (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
         date TEXT NOT NULL,
-        km REAL NOT NULL,
+        km DOUBLE PRECISION NOT NULL,
         min INTEGER NOT NULL,
         note TEXT DEFAULT ''
     )
@@ -128,9 +132,9 @@ def init():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS maintenance (
-        user_id INTEGER PRIMARY KEY,
-        last_lube REAL NOT NULL DEFAULT 0,
-        last_chain REAL NOT NULL DEFAULT 0
+        user_id BIGINT PRIMARY KEY,
+        last_lube DOUBLE PRECISION NOT NULL DEFAULT 0,
+        last_chain DOUBLE PRECISION NOT NULL DEFAULT 0
     )
     """)
 
@@ -142,7 +146,11 @@ def ensure_user(user_id: int) -> bool:
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT OR IGNORE INTO maintenance (user_id, last_lube, last_chain) VALUES (?, 0, 0)",
+        """
+        INSERT INTO maintenance (user_id, last_lube, last_chain)
+        VALUES (%s, 0, 0)
+        ON CONFLICT (user_id) DO NOTHING
+        """,
         (user_id,),
     )
     created = cur.rowcount > 0
@@ -150,14 +158,13 @@ def ensure_user(user_id: int) -> bool:
     conn.close()
     return created
 
-
 # ---------- DATA ----------
 
 def add_ride(user_id: int, ride_date: str, km: float, minutes: int, note: str = "") -> None:
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO rides (user_id, date, km, min, note) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO rides (user_id, date, km, min, note) VALUES (%s, %s, %s, %s, %s)",
         (user_id, ride_date, km, minutes, note),
     )
     conn.commit()
@@ -170,8 +177,8 @@ def update_ride(user_id: int, ride_id: int, ride_date: str, km: float, minutes: 
     cur.execute(
         """
         UPDATE rides
-        SET date = ?, km = ?, min = ?, note = ?
-        WHERE user_id = ? AND id = ?
+        SET date = %s, km = %s, min = %s, note = %s
+        WHERE user_id = %s AND id = %s
         """,
         (ride_date, km, minutes, note, user_id, ride_id),
     )
@@ -185,7 +192,7 @@ def delete_ride(user_id: int, ride_id: int) -> bool:
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "DELETE FROM rides WHERE user_id = ? AND id = ?",
+        "DELETE FROM rides WHERE user_id = %s AND id = %s",
         (user_id, ride_id),
     )
     changed = cur.rowcount > 0
@@ -196,65 +203,77 @@ def delete_ride(user_id: int, ride_id: int) -> bool:
 
 def get_ride(user_id: int, ride_id: int):
     conn = db()
-    row = conn.execute(
-        "SELECT * FROM rides WHERE user_id = ? AND id = ?",
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM rides WHERE user_id = %s AND id = %s",
         (user_id, ride_id),
-    ).fetchone()
+    )
+    row = cur.fetchone()
     conn.close()
     return row
 
 
 def total_km(user_id: int) -> float:
     conn = db()
-    value = conn.execute(
-        "SELECT COALESCE(SUM(km), 0) FROM rides WHERE user_id = ?",
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(SUM(km), 0) AS total FROM rides WHERE user_id = %s",
         (user_id,),
-    ).fetchone()[0]
+    )
+    row = cur.fetchone()
     conn.close()
-    return float(value)
+    return float(row["total"])
 
 
 def total_time(user_id: int) -> int:
     conn = db()
-    value = conn.execute(
-        "SELECT COALESCE(SUM(min), 0) FROM rides WHERE user_id = ?",
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(SUM(min), 0) AS total FROM rides WHERE user_id = %s",
         (user_id,),
-    ).fetchone()[0]
+    )
+    row = cur.fetchone()
     conn.close()
-    return int(value)
+    return int(row["total"])
 
 
 def rides_count(user_id: int) -> int:
     conn = db()
-    value = conn.execute(
-        "SELECT COUNT(*) FROM rides WHERE user_id = ?",
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) AS total FROM rides WHERE user_id = %s",
         (user_id,),
-    ).fetchone()[0]
+    )
+    row = cur.fetchone()
     conn.close()
-    return int(value)
+    return int(row["total"])
 
 
 def all_rides(user_id: int):
     conn = db()
-    rows = conn.execute(
-        "SELECT * FROM rides WHERE user_id = ? ORDER BY date DESC, id DESC",
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM rides WHERE user_id = %s ORDER BY date DESC, id DESC",
         (user_id,),
-    ).fetchall()
+    )
+    rows = cur.fetchall()
     conn.close()
     return rows
 
 
 def rides_page(user_id: int, offset: int, limit: int = RIDES_PAGE_SIZE):
     conn = db()
-    rows = conn.execute(
+    cur = conn.cursor()
+    cur.execute(
         """
         SELECT * FROM rides
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY date DESC, id DESC
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
         """,
         (user_id, limit, offset),
-    ).fetchall()
+    )
+    rows = cur.fetchall()
     conn.close()
     return rows
 
@@ -262,9 +281,9 @@ def rides_page(user_id: int, offset: int, limit: int = RIDES_PAGE_SIZE):
 def reset_user_data(user_id: int) -> None:
     conn = db()
     cur = conn.cursor()
-    cur.execute("DELETE FROM rides WHERE user_id = ?", (user_id,))
+    cur.execute("DELETE FROM rides WHERE user_id = %s", (user_id,))
     cur.execute(
-        "UPDATE maintenance SET last_lube = 0, last_chain = 0 WHERE user_id = ?",
+        "UPDATE maintenance SET last_lube = 0, last_chain = 0 WHERE user_id = %s",
         (user_id,),
     )
     conn.commit()
@@ -273,52 +292,14 @@ def reset_user_data(user_id: int) -> None:
 
 def get_maintenance(user_id: int):
     conn = db()
-    row = conn.execute(
-        "SELECT * FROM maintenance WHERE user_id = ?",
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM maintenance WHERE user_id = %s",
         (user_id,),
-    ).fetchone()
+    )
+    row = cur.fetchone()
     conn.close()
     return row
-
-
-def get_ride_number_by_id(user_id: int, ride_id: int) -> int | None:
-    rows = all_rides(user_id)
-    total = len(rows)
-
-    for idx, ride in enumerate(rows):
-        if int(ride["id"]) == ride_id:
-            return total - idx
-
-    return None
-
-
-def save_edited_ride_field(
-    user_id: int,
-    ride_id: int,
-    field: str,
-    value,
-) -> bool:
-    ride = get_ride(user_id, ride_id)
-    if not ride:
-        return False
-
-    ride_date = ride["date"]
-    km = float(ride["km"])
-    minutes = int(ride["min"])
-    note = ride["note"] or ""
-
-    if field == "date":
-        ride_date = value
-    elif field == "km":
-        km = value
-    elif field == "time":
-        minutes = value
-    elif field == "note":
-        note = value
-    else:
-        return False
-
-    return update_ride(user_id, ride_id, ride_date, km, minutes, note)
 
 
 # ---------- STATE ----------
